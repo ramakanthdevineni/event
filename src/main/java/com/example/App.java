@@ -42,6 +42,7 @@ public class App {
         server.createContext("/register", App::handleRegister);
         server.createContext("/login", App::handleLogin);
         server.createContext("/dashboard", App::handleDashboard);
+        server.createContext("/profile", App::handleProfile);
         server.createContext("/logout", App::handleLogout);
         server.createContext("/", App::handleHome);
         server.setExecutor(null);
@@ -176,6 +177,98 @@ public class App {
         }
         exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
         redirect(exchange, "/");
+    }
+
+    private static void handleProfile(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            handleProfilePost(exchange, username);
+            return;
+        }
+
+        try {
+            Map<String, String> profile = findUserProfile(username);
+            if (profile == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            sendHtmlResponse(exchange, 200, buildProfilePage(username, profile.get("first_name"), profile.get("last_name"), profile.get("email"), null));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load your profile right now."));
+        }
+    }
+
+    private static void handleProfilePost(HttpExchange exchange, String username) throws IOException {
+        String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Map<String, String> formData = parseFormData(requestBody);
+
+        String firstName = formData.getOrDefault("firstName", "").trim();
+        String lastName = formData.getOrDefault("lastName", "").trim();
+        String email = formData.getOrDefault("email", "").trim();
+        String password = formData.getOrDefault("password", "").trim();
+
+        if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+            sendHtmlResponse(exchange, 400, buildProfilePage(username, firstName, lastName, email, "First name, last name, and email are required."));
+            return;
+        }
+
+        try {
+            updateUserProfile(username, firstName, lastName, email, password);
+            sendHtmlResponse(exchange, 200, buildProfilePage(username, firstName, lastName, email, "Profile updated successfully."));
+        } catch (SQLException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.contains("UNIQUE")) {
+                sendHtmlResponse(exchange, 400, buildProfilePage(username, firstName, lastName, email, "The email address is already in use."));
+            } else {
+                sendHtmlResponse(exchange, 500, buildProfilePage(username, firstName, lastName, email, "Unable to save profile changes. Please try again later."));
+            }
+        }
+    }
+
+    private static void updateUserProfile(String username, String firstName, String lastName, String email, String password) throws SQLException {
+        String sql;
+        if (password.isEmpty()) {
+            sql = "UPDATE users SET first_name = ?, last_name = ?, email = ? WHERE username = ?";
+        } else {
+            sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, password = ? WHERE username = ?";
+        }
+
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, firstName);
+            statement.setString(2, lastName);
+            statement.setString(3, email);
+            if (password.isEmpty()) {
+                statement.setString(4, username);
+            } else {
+                statement.setString(4, password);
+                statement.setString(5, username);
+            }
+            statement.executeUpdate();
+        }
+    }
+
+    private static Map<String, String> findUserProfile(String username) throws SQLException {
+        String sql = "SELECT first_name, last_name, email FROM users WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, username);
+            try (var rs = statement.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, String> profile = new LinkedHashMap<>();
+                profile.put("first_name", rs.getString("first_name"));
+                profile.put("last_name", rs.getString("last_name"));
+                profile.put("email", rs.getString("email"));
+                return profile;
+            }
+        }
     }
 
     private static String findFirstNameByCredentials(String username, String password) throws SQLException {
@@ -347,8 +440,29 @@ public class App {
                 ".actions{display:flex;justify-content:center;gap:1rem;margin-top:1.5rem;}a.button{padding:0.95rem 1.25rem;border-radius:14px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;transition:background 0.2s ease;}a.button:hover{background:#1d4ed8;}" +
                 "</style></head><body><main class=\"card\"><h1>Welcome, " + escapeHtml(firstName) + "</h1>" +
                 "<p>Your username is " + escapeHtml(username) + ".</p>" +
-                "<div class=\"actions\"><a class=\"button\" href=\"/\">Home</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "</main></body></html>";
+    }
+
+    private static String buildProfilePage(String username, String firstName, String lastName, String email, String message) {
+        String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;margin-top:1rem;font-weight:600;\">" + escapeHtml(message) + "</p>";
+        return "<!DOCTYPE html>" +
+                "<html lang=\"en\">" +
+                "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>Edit Profile</title>" +
+                "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
+                ".card{width:min(560px,calc(100%-2rem));padding:3rem;border-radius:24px;background:rgba(255,255,255,0.14);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(10px);}" +
+                "form{display:grid;gap:1rem;}label{display:block;font-size:0.95rem;margin-bottom:0.25rem;opacity:0.9;}input{width:100%;padding:0.95rem 1rem;border-radius:14px;border:1px solid rgba(255,255,255,0.35);background:rgba(255,255,255,0.18);color:#f8fafc;font-size:1rem;outline:none;}input:focus{border-color:rgba(96,165,250,0.9);background:rgba(255,255,255,0.24);}button{padding:0.95rem 1rem;border:none;border-radius:14px;background:#2563eb;color:#ffffff;font-size:1rem;font-weight:600;cursor:pointer;transition:transform 0.2s ease,background 0.2s ease;}button:hover{background:#1d4ed8;transform:translateY(-1px);}a{display:inline-block;margin-top:1rem;color:#cbd5e1;text-decoration:none;font-size:0.95rem;}a:hover{color:#ffffff;}" +
+                "</style></head><body><main class=\"card\"><h1>Edit Profile</h1><p>Update your user details below.</p>" +
+                feedback +
+                "<form action=\"/profile\" method=\"post\">" +
+                "<div><label for=\"firstName\">First Name</label><input id=\"firstName\" name=\"firstName\" type=\"text\" value=\"" + escapeHtml(firstName) + "\" required></div>" +
+                "<div><label for=\"lastName\">Last Name</label><input id=\"lastName\" name=\"lastName\" type=\"text\" value=\"" + escapeHtml(lastName) + "\" required></div>" +
+                "<div><label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\" value=\"" + escapeHtml(email) + "\" required></div>" +
+                "<div><label for=\"password\">New Password</label><input id=\"password\" name=\"password\" type=\"password\" placeholder=\"Leave blank to keep current password\"></div>" +
+                "<div><label>Username</label><input type=\"text\" value=\"" + escapeHtml(username) + "\" disabled></div>" +
+                "<button type=\"submit\">Save Changes</button></form>" +
+                "<a href=\"/dashboard\">Back to dashboard</a></main></body></html>";
     }
 
     private static String buildErrorPage(String message) {
