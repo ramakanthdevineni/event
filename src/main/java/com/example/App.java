@@ -518,7 +518,8 @@ public class App {
         if (editData == null) {
             // when no user is selected, show Add User option on the right for admins
             if (currentIsAdmin) {
-                right = "<div class=\"placeholder\"><p style=\"margin-bottom:1rem;\">No user selected.</p><a class=\"button\" href=\"/add-user\">Add User</a></div>";
+                // Add User button moved to the top-right of the users pane; show placeholder without the button here
+                right = "<div class=\"placeholder\"><p style=\"margin-bottom:1rem;\">No user selected.</p></div>";
             } else {
                 right = "<div class=\"placeholder\">Select a user from the left to view details.</div>";
             }
@@ -558,12 +559,16 @@ public class App {
 
         String feedback = message == null ? "" : "<div style=\"padding:0.5rem 0;color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</div>";
 
-        // show welcome at top of right pane
-        String welcomeHtml = "<div style=\"margin-bottom:1rem;\"><h2 style=\"margin:0 0 0.25rem;\">Welcome, " + escapeHtml(currentFirstName) + "</h2><p style=\"margin:0;opacity:0.9;\">Signed in as " + escapeHtml(currentUsername) + "</p></div>";
+        // show welcome at top of right pane and, for admins, render an Add User button at top-right of the content area
+        String headerHtml = "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;\">" +
+                "<div><h2 style=\"margin:0 0 0.25rem;\">Welcome, " + escapeHtml(currentFirstName) + "</h2><p style=\"margin:0;opacity:0.9;\">Signed in as " + escapeHtml(currentUsername) + "</p></div>" +
+                (currentIsAdmin ? "<div><a class=\"button\" href=\"/add-user\">" +
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"vertical-align:middle;\"><path d=\"M12 5v14M5 12h14\"></path></svg> <span style=\"margin-left:0.45rem;vertical-align:middle;\">Add User</span></a></div>" : "") +
+                "</div>";
 
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
-                "<title>Users</title><style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .user-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .placeholder{opacity:0.85;} .edit-form{max-width:560px;display:grid;gap:0.75rem;} label{font-size:0.95rem;opacity:0.9;} input, select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;} button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;} a{color:#cbd5e1;}</style></head><body>" +
-                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"user-item\" href=\"/dashboard\">Dashboard</a><a class=\"user-item\" href=\"/users\">Users</a></nav><hr/> <p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(currentUsername) + "</p></aside><main class=\"main\">" + welcomeHtml + feedback + "<div style=\"display:flex;gap:2rem;align-items:flex-start;\"><div style=\"width:300px;\">" + left.toString() + "</div><div style=\"flex:1;\">" + right + "</div></div></main></div></body></html>";
+                "<title>Users</title><style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .user-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .placeholder{opacity:0.85;} .edit-form{max-width:560px;display:grid;gap:0.75rem;} label{font-size:0.95rem;opacity:0.9;} input, select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;} button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;} a{color:#cbd5e1;} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
+                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"user-item\" href=\"/dashboard\">Dashboard</a><a class=\"user-item\" href=\"/users\">Users</a></nav><hr/> <p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(currentUsername) + "</p></aside><main class=\"main\">" + headerHtml + feedback + "<div style=\"display:flex;gap:2rem;align-items:flex-start;\"><div style=\"width:300px;\">" + left.toString() + "</div><div style=\"flex:1;\">" + right + "</div></div></main></div></body></html>";
     }
 
     // --- end users handlers ---
@@ -873,7 +878,7 @@ public class App {
     }
 
     private static String buildDashboardPage(String firstName, String username, boolean isAdmin) {
-        String adminLink = isAdmin ? "<a class=\"button\" href=\"/add-user\">Add User</a>" : "";
+        String adminLink = "";
 
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
