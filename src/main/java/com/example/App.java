@@ -429,8 +429,20 @@ public class App {
         }
 
         try {
-            updateUserDetails(username, firstName, lastName, email, "admin".equalsIgnoreCase(role));
-            redirect(exchange, "/users?edit=" + java.net.URLEncoder.encode(username, StandardCharsets.UTF_8));
+            boolean updated = updateUserDetails(username, firstName, lastName, email, "admin".equalsIgnoreCase(role));
+            if (updated) {
+                // Redirect on success to avoid confusing 400/200 behavior
+                redirect(exchange, "/users?edit=" + java.net.URLEncoder.encode(username, StandardCharsets.UTF_8));
+                return;
+            } else {
+                // No rows updated — show error to user
+                var users = listAllUsers();
+                String curUser = getSessionUsername(exchange);
+                String curFirst = "";
+                try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, "No changes were applied."));
+                return;
+            }
         } catch (SQLException ex) {
             String msg = ex.getMessage();
             try {
@@ -484,7 +496,7 @@ public class App {
         return list;
     }
 
-    private static void updateUserDetails(String username, String firstName, String lastName, String email, boolean isAdmin) throws SQLException {
+    private static boolean updateUserDetails(String username, String firstName, String lastName, String email, boolean isAdmin) throws SQLException {
         String role = isAdmin ? "admin" : "user";
         String sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, is_admin = ?, role = ? WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
@@ -495,7 +507,8 @@ public class App {
             stmt.setInt(4, isAdmin ? 1 : 0);
             stmt.setString(5, role);
             stmt.setString(6, username);
-            stmt.executeUpdate();
+            int updated = stmt.executeUpdate();
+            return updated > 0;
         }
     }
 
