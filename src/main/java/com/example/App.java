@@ -80,13 +80,26 @@ public class App {
                     "created_at TEXT NOT NULL)"
             );
             ensureUserTableColumns(connection);
+            // add role column for clearer role semantics (admin/user)
+            addRoleColumnIfMissing(connection);
         }
         createDefaultAdminUser();
+        // ensure role column reflects existing is_admin flags
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("UPDATE users SET role = 'admin' WHERE is_admin = 1");
+        } catch (SQLException ex) {
+            // ignore migration failures
+        }
     }
 
     private static void ensureUserTableColumns(Connection connection) throws SQLException {
         addColumnIfMissing(connection, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0");
         addColumnIfMissing(connection, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private static void addRoleColumnIfMissing(Connection connection) throws SQLException {
+        addColumnIfMissing(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'");
     }
 
     private static void addColumnIfMissing(Connection connection, String tableName, String columnName, String columnDefinition) throws SQLException {
@@ -439,18 +452,20 @@ public class App {
         final String lastName;
         final String email;
         final boolean isAdmin;
+        final String role;
 
-        UserEntry(String username, String firstName, String lastName, String email, boolean isAdmin) {
+        UserEntry(String username, String firstName, String lastName, String email, boolean isAdmin, String role) {
             this.username = username;
             this.firstName = firstName;
             this.lastName = lastName;
             this.email = email;
             this.isAdmin = isAdmin;
+            this.role = role == null ? "user" : role;
         }
     }
 
     private static java.util.List<UserEntry> listAllUsers() throws SQLException {
-        String sql = "SELECT username, first_name, last_name, email, is_admin FROM users ORDER BY created_at DESC";
+        String sql = "SELECT username, first_name, last_name, email, is_admin, role FROM users ORDER BY created_at DESC";
         var list = new java.util.ArrayList<UserEntry>();
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql);
@@ -461,7 +476,8 @@ public class App {
                         rs.getString("first_name"),
                         rs.getString("last_name"),
                         rs.getString("email"),
-                        rs.getInt("is_admin") == 1
+                        rs.getInt("is_admin") == 1,
+                        rs.getString("role")
                 ));
             }
         }
@@ -469,14 +485,16 @@ public class App {
     }
 
     private static void updateUserDetails(String username, String firstName, String lastName, String email, boolean isAdmin) throws SQLException {
-        String sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, is_admin = ? WHERE username = ?";
+        String role = isAdmin ? "admin" : "user";
+        String sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, is_admin = ?, role = ? WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, firstName);
             stmt.setString(2, lastName);
             stmt.setString(3, email);
             stmt.setInt(4, isAdmin ? 1 : 0);
-            stmt.setString(5, username);
+            stmt.setString(5, role);
+            stmt.setString(6, username);
             stmt.executeUpdate();
         }
     }
@@ -484,27 +502,43 @@ public class App {
     private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUsername, String currentFirstName, String message) {
         StringBuilder left = new StringBuilder();
         for (UserEntry u : users) {
+            left.append("<div style=\\\"display:flex;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.5rem;\\\">");
             left.append("<a class=\\\"user-item\\\" href=\\\"/users?edit=").append(java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8)).append("\\\">")
                     .append("<div><strong>").append(escapeHtml(u.firstName)).append(" ").append(escapeHtml(u.lastName)).append("</strong><br><small>").append(escapeHtml(u.username)).append("</small>")
                     .append(u.isAdmin ? " <span style=\\\"color:#fde68a;font-weight:600;\\\">(Admin)</span>" : "")
                     .append("</div></a>");
+            // edit button (visible to admins)
+            if (currentIsAdmin) {
+                left.append("<div><a class=\\\"button\\\" href=\\\"/users?edit=").append(java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8)).append("\\\">Edit</a></div>");
+            }
+            left.append("</div>");
         }
 
         String right;
         if (editData == null) {
-            right = "<div class=\"placeholder\">Select a user from the left to view details.</div>";
+            // when no user is selected, show Add User option on the right for admins
+            if (currentIsAdmin) {
+                right = "<div class=\"placeholder\"><p style=\"margin-bottom:1rem;\">No user selected.</p><a class=\"button\" href=\"/add-user\">Add User</a></div>";
+            } else {
+                right = "<div class=\"placeholder\">Select a user from the left to view details.</div>";
+            }
         } else {
             String uname = escapeHtml(editData.getOrDefault("username", ""));
             String fn = escapeHtml(editData.getOrDefault("firstName", ""));
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
             String em = escapeHtml(editData.getOrDefault("email", ""));
-            String roleVal = editData.getOrDefault("isAdmin", "0");
+            // role may be under isAdmin or role
+            String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
 
             String roleControl;
             if (currentIsAdmin) {
-                roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\"><option value=\"user\"" + ("0".equals(roleVal) ? " selected" : "") + ">User</option><option value=\"admin\"" + ("1".equals(roleVal) ? " selected" : "") + ">Admin</option></select>";
+                // roleVal may be '1' or '0' from earlier code; convert to admin/user
+                String roleSelected = "user";
+                if ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) roleSelected = "admin";
+                roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\"><option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option><option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option></select>";
             } else {
-                roleControl = "<p><strong>Role:</strong> " + ("1".equals(roleVal) ? "Admin" : "User") + "</p>";
+                String displayRole = ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) ? "Admin" : "User";
+                roleControl = "<p><strong>Role:</strong> " + displayRole + "</p>";
             }
 
             String disabled = currentIsAdmin ? "" : "disabled";
