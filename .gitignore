@@ -1,0 +1,3 @@
+# Ignore generated SQLite database files and local data volume
+users.db
+/data

@@ -25,7 +25,8 @@ import java.util.concurrent.ConcurrentMap;
 public class App {
     private static final Path INDEX_HTML = Path.of("index.html");
     private static final Path REGISTRATION_HTML = Path.of("registration.html");
-    private static final String DB_URL = "jdbc:sqlite:users.db";
+    private static final Path DATA_DIR = Path.of("data");
+    private static final String DB_URL = "jdbc:sqlite:data/users.db";
     private static final String SESSION_COOKIE_NAME = "SESSIONID";
     private static final ConcurrentMap<String, String> sessions = new ConcurrentHashMap<>();
 
@@ -54,6 +55,12 @@ public class App {
     private static final String DEFAULT_ADMIN_EMAIL = "admin@example.com";
 
     private static void initDatabase() throws SQLException {
+        try {
+            Files.createDirectories(DATA_DIR);
+        } catch (IOException ex) {
+            throw new SQLException("Unable to create data directory", ex);
+        }
+
         try (Connection connection = DriverManager.getConnection(DB_URL);
              Statement statement = connection.createStatement()) {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS users (" +

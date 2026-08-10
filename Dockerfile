@@ -10,5 +10,6 @@ WORKDIR /app
 COPY --from=builder /app/target/event-homepage-1.0.0.jar /app/app.jar
 COPY index.html /app/index.html
 COPY registration.html /app/registration.html
+VOLUME /app/data
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
