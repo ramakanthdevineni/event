@@ -38,12 +38,73 @@
         font-size: 1.1rem;
         opacity: 0.9;
       }
+
+      .login-form {
+        display: grid;
+        gap: 1rem;
+        margin-top: 2rem;
+        text-align: left;
+      }
+
+      .login-form label {
+        font-size: 0.95rem;
+        display: block;
+        margin-bottom: 0.25rem;
+        opacity: 0.9;
+      }
+
+      .login-form input {
+        width: 100%;
+        padding: 0.9rem 1rem;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        background: rgba(255, 255, 255, 0.18);
+        color: #f8fafc;
+        font-size: 1rem;
+        outline: none;
+        transition: border-color 0.2s ease, background 0.2s ease;
+      }
+
+      .login-form input::placeholder {
+        color: rgba(248, 250, 252, 0.7);
+      }
+
+      .login-form input:focus {
+        border-color: rgba(96, 165, 250, 0.9);
+        background: rgba(255, 255, 255, 0.24);
+      }
+
+      .login-form button {
+        padding: 0.95rem 1rem;
+        border: none;
+        border-radius: 14px;
+        background: #2563eb;
+        color: #ffffff;
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.2s ease, background 0.2s ease;
+      }
+
+      .login-form button:hover {
+        background: #1d4ed8;
+        transform: translateY(-1px);
+      }
     </style>
   </head>
   <body>
     <main class="card">
       <h1>Hello Ram</h1>
       <p>Welcome to your new home page.</p>
+      <form class="login-form" action="#" method="post">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" placeholder="Enter username" />
+
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" placeholder="Enter password" />
+
+        <button type="submit">Sign In</button>
+      </form>
     </main>
   </body>
 </html>
