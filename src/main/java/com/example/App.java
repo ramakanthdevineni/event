@@ -12,19 +12,21 @@ import java.nio.file.Path;
 public class App {
     public static void main(String[] args) throws IOException {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
-        Path html = Path.of("index.html");
+        Path indexHtml = Path.of("index.html");
+        Path registrationHtml = Path.of("registration.html");
 
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/", exchange -> handleIndex(exchange, html));
+        server.createContext("/register", exchange -> handlePage(exchange, registrationHtml, "registration.html"));
+        server.createContext("/", exchange -> handlePage(exchange, indexHtml, "index.html"));
         server.setExecutor(null);
 
         System.out.println("Java application started on http://localhost:" + port);
         server.start();
     }
 
-    private static void handleIndex(HttpExchange exchange, Path html) throws IOException {
+    private static void handlePage(HttpExchange exchange, Path html, String fileName) throws IOException {
         if (!Files.exists(html)) {
-            String missing = "index.html not found in working directory.";
+            String missing = fileName + " not found in working directory.";
             byte[] bytes = missing.getBytes();
             exchange.sendResponseHeaders(500, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) {
