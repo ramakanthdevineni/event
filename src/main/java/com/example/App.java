@@ -49,6 +49,10 @@ public class App {
         server.start();
     }
 
+    private static final String DEFAULT_ADMIN_USERNAME = "admin";
+    private static final String DEFAULT_ADMIN_PASSWORD = "Certified01$";
+    private static final String DEFAULT_ADMIN_EMAIL = "admin@example.com";
+
     private static void initDatabase() throws SQLException {
         try (Connection connection = DriverManager.getConnection(DB_URL);
              Statement statement = connection.createStatement()) {
@@ -61,6 +65,21 @@ public class App {
                     "password TEXT NOT NULL, " +
                     "created_at TEXT NOT NULL)"
             );
+        }
+        createDefaultAdminUser();
+    }
+
+    private static void createDefaultAdminUser() throws SQLException {
+        String sql = "INSERT OR IGNORE INTO users (first_name, last_name, username, email, password, created_at) VALUES (?, ?, ?, ?, ?, ?)";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, "Admin");
+            statement.setString(2, "User");
+            statement.setString(3, DEFAULT_ADMIN_USERNAME);
+            statement.setString(4, DEFAULT_ADMIN_EMAIL);
+            statement.setString(5, DEFAULT_ADMIN_PASSWORD);
+            statement.setString(6, Instant.now().toString());
+            statement.executeUpdate();
         }
     }
 
