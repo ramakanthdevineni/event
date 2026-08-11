@@ -2052,8 +2052,23 @@ public class App {
                         .append(escapeHtml(matched.label)).append("</a>");
             }
         }
-        return "<aside class=\"sidebar\"><h2>Navigation</h2><nav>" + nav + "</nav><hr/>" +
-                "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside>";
+        return "<aside class=\"sidebar\" id=\"app-sidebar\">" +
+                "<button type=\"button\" class=\"nav-menu-toggle\" aria-expanded=\"false\" aria-controls=\"sidebar-nav-panel\">" +
+                "<span class=\"nav-menu-icon\" aria-hidden=\"true\">&#9776;</span><span>Menu</span></button>" +
+                "<div class=\"sidebar-panel\" id=\"sidebar-nav-panel\">" +
+                "<h2 class=\"sidebar-title\">Navigation</h2><nav>" + nav + "</nav><hr/>" +
+                "<p class=\"sidebar-user\">Logged in as " + escapeHtml(username) + "</p>" +
+                "</div></aside>" +
+                "<script>(function(){var side=document.getElementById('app-sidebar');" +
+                "var btn=side&&side.querySelector('.nav-menu-toggle');" +
+                "if(!side||!btn){return;}" +
+                "btn.addEventListener('click',function(e){e.stopPropagation();" +
+                "var open=side.classList.toggle('nav-open');" +
+                "btn.setAttribute('aria-expanded',open?'true':'false');});" +
+                "document.addEventListener('click',function(e){" +
+                "if(!side.contains(e.target)){side.classList.remove('nav-open');" +
+                "btn.setAttribute('aria-expanded','false');}});" +
+                "})();</script>";
     }
 
     // Roles are stored comma-separated in users.role. Admin grants full access; venue labels
@@ -2272,14 +2287,40 @@ public class App {
     }
 
     private static String sidebarLayoutStyles() {
-        return "body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
-                ".container{display:flex;min-height:100vh;}" +
-                ".sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);}" +
+        return "html,body{margin:0;padding:0;max-width:100%;overflow-x:hidden;}" +
+                "body{font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
+                "*,*:before,*:after{box-sizing:border-box;}" +
+                ".container{display:flex;min-height:100vh;width:100%;max-width:100%;}" +
+                ".sidebar{width:260px;flex-shrink:0;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);}" +
+                ".nav-menu-toggle{display:none;align-items:center;gap:0.45rem;padding:0.55rem 0.85rem;border:1px solid rgba(255,255,255,0.22);" +
+                "border-radius:10px;background:#1e293b;color:#f8fafc;font-size:0.9rem;font-weight:600;cursor:pointer;}" +
+                ".nav-menu-toggle:hover{background:#334155;}" +
+                ".nav-menu-icon{font-size:1.1rem;line-height:1;}" +
+                ".sidebar-title{margin:0 0 0.75rem;font-size:1.25rem;}" +
+                ".sidebar-user{opacity:0.8;font-size:0.9rem;margin:0;}" +
                 ".nav-item,.user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;}" +
                 ".nav-item:hover,.user-item:hover{background:rgba(255,255,255,0.03);}" +
-                ".main{flex:1;padding:2rem;}" +
+                ".main{flex:1;min-width:0;padding:2rem;width:100%;}" +
                 "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
-                "a.button:hover{background:#1d4ed8;}";
+                "a.button:hover{background:#1d4ed8;}" +
+                "@media (max-width:900px){" +
+                ".container{flex-direction:column;}" +
+                ".sidebar{width:100%;padding:0.7rem 0.85rem;border-right:none;border-bottom:1px solid rgba(255,255,255,0.08);" +
+                "position:sticky;top:0;z-index:40;background:rgba(15,23,42,0.96);backdrop-filter:blur(8px);}" +
+                ".nav-menu-toggle{display:inline-flex;}" +
+                ".sidebar-panel{display:none;margin-top:0.65rem;padding-top:0.35rem;}" +
+                ".sidebar.nav-open .sidebar-panel{display:block;}" +
+                ".sidebar-title{font-size:1.05rem;margin-bottom:0.5rem;}" +
+                ".main{padding:1rem;width:100%;max-width:100%;}" +
+                ".top-actions{justify-content:flex-start;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem;}" +
+                ".card,.status-overview,.status-detail,.status-detail-empty,.map-card,.legend-card," +
+                ".users-panel,.users-edit-panel{max-width:100%;width:100%;padding:1.15rem;}" +
+                ".status-layout,.map-layout{flex-direction:column;}" +
+                ".work-table,.status-table,.legend-table,.users-table{display:block;width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}" +
+                ".status-form select{min-width:0;width:100%;max-width:100%;}" +
+                ".page-header{flex-direction:column;align-items:flex-start;}" +
+                ".header-actions{width:100%;flex-wrap:wrap;}" +
+                "}";
     }
 
     private static class UserEntry {
@@ -2526,13 +2567,7 @@ public class App {
                 "</div></div>";
 
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
-                "<title>Users</title><style>" +
-                "body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
-                ".container{display:flex;min-height:100vh;}" +
-                ".sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);}" +
-                ".user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;}" +
-                ".user-item:hover{background:rgba(255,255,255,0.03);}" +
-                ".main{flex:1;padding:2rem;}" +
+                "<title>Users</title><style>" + sidebarLayoutStyles() +
                 ".page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;}" +
                 ".page-header-text h2{margin:0 0 0.25rem;font-size:1.35rem;}" +
                 ".page-header-text p{margin:0;opacity:0.9;font-size:0.9rem;}" +
