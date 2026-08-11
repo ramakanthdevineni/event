@@ -2305,7 +2305,8 @@ public class App {
                 "a.button:hover{background:#1d4ed8;}" +
                 "@media (max-width:900px){" +
                 ".container{flex-direction:column;}" +
-                ".sidebar{width:100%;padding:0.7rem 0.85rem;border-right:none;border-bottom:1px solid rgba(255,255,255,0.08);" +
+                ".sidebar{width:100%;padding:calc(0.75rem + max(env(safe-area-inset-top, 0px), 36px)) 0.85rem 0.75rem;" +
+                "border-right:none;border-bottom:1px solid rgba(255,255,255,0.08);" +
                 "position:sticky;top:0;z-index:40;background:rgba(15,23,42,0.96);backdrop-filter:blur(8px);}" +
                 ".nav-menu-toggle{display:inline-flex;}" +
                 ".sidebar-panel{display:none;margin-top:0.65rem;padding-top:0.35rem;}" +
