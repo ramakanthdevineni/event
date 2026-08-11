@@ -2583,9 +2583,11 @@ public class App {
                 ".role-dropdown.open .role-dropdown-toggle{border-color:#60a5fa;background:#1e3a5f;}" +
                 ".role-dropdown-summary{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
                 ".role-dropdown-caret{opacity:0.8;font-size:0.7rem;flex-shrink:0;}" +
-                ".role-dropdown-panel{position:fixed;z-index:1000;width:260px;max-height:280px;display:flex;flex-direction:column;" +
-                "padding:0.55rem;border-radius:10px;border:1px solid rgba(255,255,255,0.18);" +
+                ".role-dropdown-panel{display:none;position:fixed;z-index:1000;width:260px;max-height:280px;" +
+                "flex-direction:column;padding:0.55rem;border-radius:10px;border:1px solid rgba(255,255,255,0.18);" +
                 "background:#0f172a;box-shadow:0 16px 40px rgba(0,0,0,0.45);}" +
+                ".role-dropdown-panel[hidden]{display:none !important;}" +
+                ".role-dropdown.open .role-dropdown-panel{display:flex;}" +
                 ".role-dropdown-search{width:100%;box-sizing:border-box;margin-bottom:0.45rem;padding:0.45rem 0.55rem;" +
                 "border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#fff;font-size:0.75rem;flex-shrink:0;}" +
                 ".role-dropdown-search::placeholder{color:rgba(248,250,252,0.55);}" +
@@ -2600,6 +2602,7 @@ public class App {
                 ".role-label{display:block;font-size:0.95rem;opacity:0.9;margin-bottom:0.4rem;}" +
                 ".role-display{font-size:0.78rem;}" +
                 ".users-edit-panel .role-dropdown-panel{position:static;width:100%;max-width:360px;max-height:240px;margin-top:0.4rem;}" +
+                ".users-edit-panel .role-dropdown.open .role-dropdown-panel{display:flex;}" +
                 ".user-actions{display:flex;flex-wrap:nowrap;gap:0.3rem;align-items:center;}" +
                 ".user-action-form{display:inline;margin:0;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
