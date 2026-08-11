@@ -35,8 +35,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 public class App {
     private static final Path INDEX_HTML = Path.of("index.html");
@@ -47,25 +45,6 @@ public class App {
     private static final String SESSION_COOKIE_NAME = "SESSIONID";
     private static final String DEFAULT_NEW_USER_PASSWORD = "Match123$";
     private static final long SESSION_TIMEOUT_MS = 5 * 60 * 1000L;
-    private static final ConcurrentMap<String, SessionInfo> sessions = new ConcurrentHashMap<>();
-
-    private static class SessionInfo {
-        final String username;
-        volatile long lastActivityMs;
-
-        SessionInfo(String username) {
-            this.username = username;
-            this.lastActivityMs = System.currentTimeMillis();
-        }
-
-        void touch() {
-            lastActivityMs = System.currentTimeMillis();
-        }
-
-        boolean isExpired() {
-            return System.currentTimeMillis() - lastActivityMs > SESSION_TIMEOUT_MS;
-        }
-    }
 
     public static void main(String[] args) throws IOException {
         try {
@@ -75,25 +54,52 @@ public class App {
         }
 
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
+        String service = System.getenv().getOrDefault("SERVICE_NAME", "all").trim().toLowerCase(Locale.ROOT);
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/register", App::handleRegister);
-        server.createContext("/login", App::handleLogin);
-        server.createContext("/dashboard", App::handleDashboard);
-        server.createContext("/users", App::handleUsers);
-        server.createContext("/add-user", App::handleAddUser);
-        server.createContext("/admin-panel", App::handleAdminPanel);
-        server.createContext("/status/export", App::handleStatusExport);
-        server.createContext("/status", App::handleStatus);
-        server.createContext("/mapview", App::handleMapview);
-        server.createContext("/page", App::handleCustomPage);
-        server.createContext("/change-password", App::handleChangePassword);
-        server.createContext("/profile", App::handleProfile);
-        server.createContext("/logout", App::handleLogout);
-        server.createContext("/", App::handleHome);
+        registerServiceRoutes(server, service);
         server.setExecutor(null);
 
-        System.out.println("Java application started on http://localhost:" + port);
+        System.out.println("Java service '" + service + "' started on http://localhost:" + port);
         server.start();
+    }
+
+    private static boolean serves(String service, String... names) {
+        if ("all".equals(service)) {
+            return true;
+        }
+        for (String name : names) {
+            if (name.equals(service)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void registerServiceRoutes(HttpServer server, String service) {
+        if (serves(service, "core")) {
+            server.createContext("/register", App::handleRegister);
+            server.createContext("/login", App::handleLogin);
+            server.createContext("/dashboard", App::handleDashboard);
+            server.createContext("/page", App::handleCustomPage);
+            server.createContext("/change-password", App::handleChangePassword);
+            server.createContext("/profile", App::handleProfile);
+            server.createContext("/logout", App::handleLogout);
+            server.createContext("/", App::handleHome);
+        }
+        if (serves(service, "users")) {
+            server.createContext("/users", App::handleUsers);
+            server.createContext("/add-user", App::handleAddUser);
+        }
+        if (serves(service, "admin")) {
+            server.createContext("/admin-panel", App::handleAdminPanel);
+        }
+        if (serves(service, "status")) {
+            server.createContext("/status/export", App::handleStatusExport);
+            server.createContext("/status", App::handleStatus);
+        }
+        if (serves(service, "mapview")) {
+            server.createContext("/mapview", App::handleMapview);
+        }
     }
 
     private static final String DEFAULT_ADMIN_USERNAME = "admin";
@@ -129,6 +135,13 @@ public class App {
                     "label TEXT NOT NULL UNIQUE, " +
                     "created_at TEXT NOT NULL)"
             );
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sessions (" +
+                    "session_id TEXT PRIMARY KEY, " +
+                    "username TEXT NOT NULL, " +
+                    "last_activity_ms INTEGER NOT NULL)"
+            );
+            statement.execute("PRAGMA journal_mode=WAL");
+            statement.execute("PRAGMA busy_timeout=5000");
         }
         initStatusDatabase();
         ensureDefaultWorkItemsForAllNavOptions();
@@ -377,7 +390,7 @@ public class App {
     private static void handleLogout(HttpExchange exchange) throws IOException {
         String sessionId = getSessionIdFromCookie(exchange);
         if (sessionId != null) {
-            sessions.remove(sessionId);
+            destroySession(sessionId);
         }
         exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
         redirect(exchange, "/");
@@ -1270,7 +1283,7 @@ public class App {
                 return;
             }
             deleteUser(username);
-            sessions.entrySet().removeIf(entry -> entry.getValue().username.equals(username));
+            destroySessionsForUser(username);
             redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" deleted.");
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to delete the user."));
@@ -1296,7 +1309,7 @@ public class App {
             boolean newEnabled = !target.enabled;
             setUserEnabled(username, newEnabled);
             if (!newEnabled) {
-                sessions.entrySet().removeIf(entry -> entry.getValue().username.equals(username));
+                destroySessionsForUser(username);
             }
             String statusLabel = newEnabled ? "enabled" : "disabled";
             redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" " + statusLabel + ".");
@@ -2534,8 +2547,39 @@ public class App {
 
     private static String createSession(String username) {
         String sessionId = UUID.randomUUID().toString();
-        sessions.put(sessionId, new SessionInfo(username));
+        long now = System.currentTimeMillis();
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)")) {
+            statement.execute("PRAGMA busy_timeout=5000");
+            statement.setString(1, sessionId);
+            statement.setString(2, username);
+            statement.setLong(3, now);
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Unable to create session", ex);
+        }
         return sessionId;
+    }
+
+    private static void destroySession(String sessionId) {
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement("DELETE FROM sessions WHERE session_id = ?")) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException ignored) {
+            // best-effort cleanup
+        }
+    }
+
+    private static void destroySessionsForUser(String username) {
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement("DELETE FROM sessions WHERE username = ?")) {
+            statement.setString(1, username);
+            statement.executeUpdate();
+        } catch (SQLException ignored) {
+            // best-effort cleanup
+        }
     }
 
     private static String getSessionIdFromCookie(HttpExchange exchange) {
@@ -2557,17 +2601,35 @@ public class App {
         if (sessionId == null) {
             return null;
         }
-        SessionInfo session = sessions.get(sessionId);
-        if (session == null) {
+
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement select = connection.prepareStatement(
+                     "SELECT username, last_activity_ms FROM sessions WHERE session_id = ?")) {
+            select.execute("PRAGMA busy_timeout=5000");
+            select.setString(1, sessionId);
+            try (var rs = select.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                String username = rs.getString("username");
+                long lastActivityMs = rs.getLong("last_activity_ms");
+                long now = System.currentTimeMillis();
+                if (now - lastActivityMs > SESSION_TIMEOUT_MS) {
+                    destroySession(sessionId);
+                    exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
+                    return null;
+                }
+                try (PreparedStatement touch = connection.prepareStatement(
+                        "UPDATE sessions SET last_activity_ms = ? WHERE session_id = ?")) {
+                    touch.setLong(1, now);
+                    touch.setString(2, sessionId);
+                    touch.executeUpdate();
+                }
+                return username;
+            }
+        } catch (SQLException ex) {
             return null;
         }
-        if (session.isExpired()) {
-            sessions.remove(sessionId);
-            exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
-            return null;
-        }
-        session.touch();
-        return session.username;
     }
 
     private static boolean userExists(String username) throws SQLException {
@@ -3133,15 +3195,6 @@ public class App {
                     .append("\" stroke-width=\"").append(active ? "2.5" : "1.2")
                     .append("\" stroke-dasharray=\"").append(active ? "0" : "5 4")
                     .append("\"/>");
-            if (!active) {
-                continue;
-            }
-            boundaries.append("<text x=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
-                    .append("\" y=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1] + CITY_BOUNDARY_RY[i] + 14))
-                    .append("\" text-anchor=\"middle\" class=\"city-boundary-label\">")
-                    .append(escapeHtml(CITY_ALIASES[i][0].substring(0, 1).toUpperCase(java.util.Locale.ROOT)
-                            + CITY_ALIASES[i][0].substring(1)))
-                    .append("</text>");
         }
         return boundaries.toString();
     }
@@ -3268,7 +3321,6 @@ public class App {
                 " .map-svg.dragging{cursor:grabbing;}" +
                 " .land{fill:#1d4ed8;stroke:#93c5fd;stroke-width:2;opacity:0.85;}" +
                 " .city-boundary{opacity:0.95;}" +
-                " .city-boundary-label{fill:#bfdbfe;font-size:11px;font-family:Arial,Helvetica,sans-serif;text-transform:capitalize;opacity:0.9;}" +
                 " .marker-label{fill:#f8fafc;font-size:13px;font-family:Arial,Helvetica,sans-serif;paint-order:stroke;stroke:#0f172a;stroke-width:3px;}" +
                 " .legend-table{width:100%;border-collapse:collapse;}" +
                 " .legend-table th,.legend-table td{padding:0.65rem 0.4rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);}" +
