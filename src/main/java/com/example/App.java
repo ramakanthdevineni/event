@@ -27,6 +27,7 @@ public class App {
     private static final Path REGISTRATION_HTML = Path.of("registration.html");
     private static final Path DATA_DIR = Path.of("data");
     private static final String DB_URL = "jdbc:sqlite:data/users.db";
+    private static final String STATUS_DB_URL = "jdbc:sqlite:data/status.db";
     private static final String SESSION_COOKIE_NAME = "SESSIONID";
     private static final String DEFAULT_NEW_USER_PASSWORD = "Match123$";
     private static final long SESSION_TIMEOUT_MS = 5 * 60 * 1000L;
@@ -65,6 +66,7 @@ public class App {
         server.createContext("/users", App::handleUsers);
         server.createContext("/add-user", App::handleAddUser);
         server.createContext("/admin-panel", App::handleAdminPanel);
+        server.createContext("/status", App::handleStatus);
         server.createContext("/page", App::handleCustomPage);
         server.createContext("/change-password", App::handleChangePassword);
         server.createContext("/profile", App::handleProfile);
@@ -108,15 +110,8 @@ public class App {
                     "label TEXT NOT NULL UNIQUE, " +
                     "created_at TEXT NOT NULL)"
             );
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_work_items (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-                    "nav_option_id INTEGER NOT NULL, " +
-                    "item_name TEXT NOT NULL, " +
-                    "status TEXT NOT NULL DEFAULT 'Not started', " +
-                    "UNIQUE(nav_option_id, item_name), " +
-                    "FOREIGN KEY(nav_option_id) REFERENCES nav_options(id) ON DELETE CASCADE)"
-            );
         }
+        initStatusDatabase();
         ensureDefaultWorkItemsForAllNavOptions();
         createDefaultAdminUser();
         // ensure role column reflects existing is_admin flags
@@ -125,6 +120,58 @@ public class App {
             stmt.executeUpdate("UPDATE users SET role = 'admin' WHERE is_admin = 1");
         } catch (SQLException ex) {
             // ignore migration failures
+        }
+    }
+
+    private static void initStatusDatabase() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_work_items (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "nav_option_id INTEGER NOT NULL, " +
+                    "option_label TEXT NOT NULL, " +
+                    "item_name TEXT NOT NULL, " +
+                    "status TEXT NOT NULL DEFAULT 'Not started', " +
+                    "updated_at TEXT NOT NULL, " +
+                    "UNIQUE(nav_option_id, item_name))"
+            );
+        }
+        migrateWorkItemsFromUsersDbIfNeeded();
+    }
+
+    private static void migrateWorkItemsFromUsersDbIfNeeded() {
+        try (Connection usersDb = DriverManager.getConnection(DB_URL);
+             Statement check = usersDb.createStatement();
+             var tables = check.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='nav_work_items'")) {
+            if (!tables.next()) {
+                return;
+            }
+        } catch (SQLException ex) {
+            return;
+        }
+
+        try (Connection usersDb = DriverManager.getConnection(DB_URL);
+             Connection statusDb = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement select = usersDb.prepareStatement(
+                     "SELECT w.nav_option_id, COALESCE(n.label, ''), w.item_name, w.status " +
+                             "FROM nav_work_items w LEFT JOIN nav_options n ON n.id = w.nav_option_id");
+             PreparedStatement insert = statusDb.prepareStatement(
+                     "INSERT OR IGNORE INTO nav_work_items (nav_option_id, option_label, item_name, status, updated_at) VALUES (?, ?, ?, ?, ?)");
+             var rs = select.executeQuery()) {
+            while (rs.next()) {
+                insert.setInt(1, rs.getInt("nav_option_id"));
+                insert.setString(2, rs.getString(2));
+                insert.setString(3, rs.getString("item_name"));
+                insert.setString(4, rs.getString("status"));
+                insert.setString(5, Instant.now().toString());
+                insert.addBatch();
+            }
+            insert.executeBatch();
+            try (Statement drop = usersDb.createStatement()) {
+                drop.executeUpdate("DROP TABLE IF EXISTS nav_work_items");
+            }
+        } catch (SQLException ignored) {
+            // keep going if migration fails
         }
     }
 
@@ -550,6 +597,45 @@ public class App {
         }
     }
 
+    private static void handleStatus(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            if (!user.isAdmin) {
+                redirect(exchange, resolveHomePath(user, listNavOptions()));
+                return;
+            }
+
+            java.util.List<NavOption> navOptions = listNavOptions();
+            java.util.List<OptionProgress> progressList = listOptionProgress();
+
+            Map<String, String> q = parseQueryString(exchange.getRequestURI().getQuery());
+            Integer selectedId = parseNavOptionId(q.get("id"));
+            OptionProgress selected = null;
+            if (selectedId != null) {
+                for (OptionProgress progress : progressList) {
+                    if (progress.option.id == selectedId) {
+                        selected = progress;
+                        break;
+                    }
+                }
+            }
+
+            sendHtmlResponse(exchange, 200, buildStatusPage(username, user.firstName, navOptions, progressList, selected));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load status right now."));
+        }
+    }
+
     private static final String[] DEFAULT_WORK_ITEMS = {
             "Fiber Laying",
             "PTA",
@@ -968,18 +1054,19 @@ public class App {
             stmt.setInt(2, id);
             stmt.executeUpdate();
         }
+        syncWorkItemOptionLabel(new NavOption(id, label));
     }
 
     private static void deleteNavOption(int id) throws SQLException {
-        try (Connection connection = DriverManager.getConnection(DB_URL)) {
-            try (PreparedStatement deleteItems = connection.prepareStatement("DELETE FROM nav_work_items WHERE nav_option_id = ?")) {
-                deleteItems.setInt(1, id);
-                deleteItems.executeUpdate();
-            }
-            try (PreparedStatement deleteOption = connection.prepareStatement("DELETE FROM nav_options WHERE id = ?")) {
-                deleteOption.setInt(1, id);
-                deleteOption.executeUpdate();
-            }
+        try (Connection statusDb = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement deleteItems = statusDb.prepareStatement("DELETE FROM nav_work_items WHERE nav_option_id = ?")) {
+            deleteItems.setInt(1, id);
+            deleteItems.executeUpdate();
+        }
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement deleteOption = connection.prepareStatement("DELETE FROM nav_options WHERE id = ?")) {
+            deleteOption.setInt(1, id);
+            deleteOption.executeUpdate();
         }
     }
 
@@ -993,30 +1080,63 @@ public class App {
         }
     }
 
+    private static class OptionProgress {
+        final NavOption option;
+        final java.util.List<WorkItem> workItems;
+        final int overallPercent;
+
+        OptionProgress(NavOption option, java.util.List<WorkItem> workItems, int overallPercent) {
+            this.option = option;
+            this.workItems = workItems;
+            this.overallPercent = overallPercent;
+        }
+    }
+
     private static void ensureDefaultWorkItemsForAllNavOptions() throws SQLException {
         for (NavOption option : listNavOptions()) {
-            ensureDefaultWorkItems(option.id);
+            ensureDefaultWorkItems(option);
         }
     }
 
     private static void ensureDefaultWorkItems(int navOptionId) throws SQLException {
-        String sql = "INSERT OR IGNORE INTO nav_work_items (nav_option_id, item_name, status) VALUES (?, ?, ?)";
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        NavOption option = findNavOptionById(navOptionId);
+        if (option != null) {
+            ensureDefaultWorkItems(option);
+        }
+    }
+
+    private static void ensureDefaultWorkItems(NavOption option) throws SQLException {
+        String sql = "INSERT OR IGNORE INTO nav_work_items (nav_option_id, option_label, item_name, status, updated_at) VALUES (?, ?, ?, ?, ?)";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
+            String now = Instant.now().toString();
             for (String itemName : DEFAULT_WORK_ITEMS) {
-                stmt.setInt(1, navOptionId);
-                stmt.setString(2, itemName);
-                stmt.setString(3, "Not started");
+                stmt.setInt(1, option.id);
+                stmt.setString(2, option.label);
+                stmt.setString(3, itemName);
+                stmt.setString(4, "Not started");
+                stmt.setString(5, now);
                 stmt.addBatch();
             }
             stmt.executeBatch();
+        }
+        syncWorkItemOptionLabel(option);
+    }
+
+    private static void syncWorkItemOptionLabel(NavOption option) throws SQLException {
+        String sql = "UPDATE nav_work_items SET option_label = ? WHERE nav_option_id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, option.label);
+            stmt.setInt(2, option.id);
+            stmt.executeUpdate();
         }
     }
 
     private static java.util.List<WorkItem> listWorkItems(int navOptionId) throws SQLException {
         String sql = "SELECT item_name, status FROM nav_work_items WHERE nav_option_id = ? ORDER BY id ASC";
         var list = new java.util.ArrayList<WorkItem>();
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setInt(1, navOptionId);
             try (var rs = stmt.executeQuery()) {
@@ -1031,7 +1151,6 @@ public class App {
             return listWorkItems(navOptionId);
         }
 
-        // Keep display order matching DEFAULT_WORK_ITEMS
         var ordered = new java.util.ArrayList<WorkItem>();
         for (String expected : DEFAULT_WORK_ITEMS) {
             for (WorkItem item : list) {
@@ -1045,14 +1164,49 @@ public class App {
     }
 
     private static void updateWorkItemStatus(int navOptionId, String itemName, String status) throws SQLException {
-        String sql = "UPDATE nav_work_items SET status = ? WHERE nav_option_id = ? AND item_name = ?";
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        String sql = "UPDATE nav_work_items SET status = ?, updated_at = ? WHERE nav_option_id = ? AND item_name = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, status);
-            stmt.setInt(2, navOptionId);
-            stmt.setString(3, itemName);
+            stmt.setString(2, Instant.now().toString());
+            stmt.setInt(3, navOptionId);
+            stmt.setString(4, itemName);
             stmt.executeUpdate();
         }
+    }
+
+    private static int statusToPercent(String status) {
+        if (status == null) {
+            return 0;
+        }
+        return switch (status) {
+            case "In Progress" -> 25;
+            case "50% Complete" -> 50;
+            case "75% Complete" -> 75;
+            case "Completed" -> 100;
+            default -> 0;
+        };
+    }
+
+    private static int calculateOverallProgress(java.util.List<WorkItem> workItems) {
+        if (workItems == null || workItems.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (WorkItem item : workItems) {
+            total += statusToPercent(item.status);
+        }
+        return Math.round(total / (float) workItems.size());
+    }
+
+    private static java.util.List<OptionProgress> listOptionProgress() throws SQLException {
+        var result = new java.util.ArrayList<OptionProgress>();
+        for (NavOption option : listNavOptions()) {
+            ensureDefaultWorkItems(option);
+            java.util.List<WorkItem> items = listWorkItems(option.id);
+            result.add(new OptionProgress(option, items, calculateOverallProgress(items)));
+        }
+        return result;
     }
 
     private static void updateUsersRoleByLabel(String oldLabel, String newLabel) throws SQLException {
@@ -1094,6 +1248,7 @@ public class App {
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/admin-panel\">Admin Panel</a>");
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/status\">Status</a>");
             for (NavOption option : navOptions) {
                 nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
                         .append(escapeHtml(option.label)).append("</a>");
@@ -1943,6 +2098,78 @@ public class App {
                 "<div style=\"margin-top:2rem;\"><h2 style=\"margin:0 0 0.75rem;font-size:1.1rem;\">Current Navigation Options</h2>" +
                 existingOptions +
                 "</div></div></main></div></body></html>";
+    }
+
+    private static String buildStatusPage(String username, String firstName, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList, OptionProgress selected) {
+        StringBuilder overviewRows = new StringBuilder();
+        if (progressList.isEmpty()) {
+            overviewRows.append("<tr><td colspan=\"2\" class=\"empty-cell\">No options available yet. Add options in Admin Panel.</td></tr>");
+        } else {
+            for (OptionProgress progress : progressList) {
+                boolean isSelected = selected != null && selected.option.id == progress.option.id;
+                overviewRows.append("<tr").append(isSelected ? " class=\"selected\"" : "").append(">")
+                        .append("<td><a class=\"option-link\" href=\"/status?id=").append(progress.option.id).append("\">")
+                        .append(escapeHtml(progress.option.label)).append("</a></td>")
+                        .append("<td><a class=\"progress-link\" href=\"/status?id=").append(progress.option.id).append("\">")
+                        .append("<div class=\"progress-wrap\"><div class=\"progress-bar\" style=\"width:")
+                        .append(progress.overallPercent).append("%;\"></div></div>")
+                        .append("<span class=\"progress-label\">").append(progress.overallPercent).append("% overall</span>")
+                        .append("</a></td></tr>");
+            }
+        }
+
+        String detailHtml;
+        if (selected == null) {
+            detailHtml = "<div class=\"status-detail-empty\"><p>Select an option to view individual progress.</p></div>";
+        } else {
+            StringBuilder detailRows = new StringBuilder();
+            for (WorkItem item : selected.workItems) {
+                int pct = statusToPercent(item.status);
+                detailRows.append("<tr>")
+                        .append("<td>").append(escapeHtml(item.name)).append("</td>")
+                        .append("<td>").append(escapeHtml(item.status)).append("</td>")
+                        .append("<td><div class=\"progress-wrap small\"><div class=\"progress-bar\" style=\"width:")
+                        .append(pct).append("%;\"></div></div><span class=\"progress-label\">").append(pct).append("%</span></td>")
+                        .append("</tr>");
+            }
+            detailHtml = "<div class=\"status-detail\">" +
+                    "<div class=\"status-detail-header\">" +
+                    "<h3>" + escapeHtml(selected.option.label) + "</h3>" +
+                    "<p>Overall progress: <strong>" + selected.overallPercent + "%</strong></p>" +
+                    "</div>" +
+                    "<table class=\"status-table\"><thead><tr><th>Work Item</th><th>Status</th><th>Progress</th></tr></thead><tbody>" +
+                    detailRows +
+                    "</tbody></table></div>";
+        }
+
+        return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>Status</title><style>" + sidebarLayoutStyles() +
+                " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
+                " .status-layout{display:flex;gap:1.5rem;align-items:flex-start;}" +
+                " .status-overview,.status-detail,.status-detail-empty{flex:1;min-width:0;padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
+                " .status-overview h2,.status-detail h3{margin:0 0 1rem;}" +
+                " .status-detail-header p{margin:0 0 1rem;opacity:0.9;}" +
+                " .status-table{width:100%;border-collapse:collapse;}" +
+                " .status-table th,.status-table td{padding:0.8rem 0.7rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
+                " .status-table th{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;}" +
+                " .status-table tr.selected{background:rgba(255,255,255,0.08);}" +
+                " .option-link,.progress-link{color:#f8fafc;text-decoration:none;display:block;}" +
+                " .option-link:hover,.progress-link:hover{color:#93c5fd;}" +
+                " .progress-wrap{height:10px;border-radius:999px;background:rgba(255,255,255,0.12);overflow:hidden;margin-bottom:0.35rem;}" +
+                " .progress-wrap.small{height:8px;display:inline-block;width:120px;margin-right:0.5rem;margin-bottom:0;vertical-align:middle;}" +
+                " .progress-bar{height:100%;background:linear-gradient(90deg,#22c55e,#4ade80);}" +
+                " .progress-label{font-size:0.85rem;opacity:0.9;}" +
+                " .empty-cell,.status-detail-empty{opacity:0.8;}" +
+                "</style></head><body>" +
+                "<div class=\"container\">" + buildSidebarHtml(username, "admin", navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"status-layout\">" +
+                "<div class=\"status-overview\"><h2>Overall Progress</h2>" +
+                "<table class=\"status-table\"><thead><tr><th>Option</th><th>Progress</th></tr></thead><tbody>" +
+                overviewRows +
+                "</tbody></table></div>" +
+                detailHtml +
+                "</div></main></div></body></html>";
     }
 
     private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions, java.util.List<WorkItem> workItems) {
