@@ -56,8 +56,13 @@ export function UsersPage() {
   }
 
   async function toggleEnabled(username: string) {
-    await api.put('/api/users', { action: 'toggle-enabled', username })
-    await load()
+    setError('')
+    try {
+      await api.put('/api/users', { action: 'toggle-enabled', username })
+      await load()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Unable to update user status')
+    }
   }
 
   async function removeUser(username: string) {

@@ -47,20 +47,10 @@ public class App {
     private static final long SESSION_TIMEOUT_MS = 5 * 60 * 1000L;
 
     public static void main(String[] args) throws IOException {
-        try {
-            initDatabase();
-        } catch (SQLException ex) {
-            throw new IOException("Unable to initialize database", ex);
-        }
-
-        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
-        String service = System.getenv().getOrDefault("SERVICE_NAME", "all").trim().toLowerCase(Locale.ROOT);
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        registerServiceRoutes(server, service);
-        server.setExecutor(null);
-
-        System.out.println("Java service '" + service + "' started on http://localhost:" + port);
-        server.start();
+        // Deprecated: use com.example.VmsApplication (Spring Boot) as the process entrypoint.
+        // Kept temporarily so legacy helpers remain available during migration.
+        throw new UnsupportedOperationException(
+                "HttpServer App entrypoint retired. Start com.example.VmsApplication instead.");
     }
 
     private static boolean serves(String service, String... names) {
@@ -119,7 +109,7 @@ public class App {
     private static final String DEFAULT_ADMIN_PASSWORD = "Certified01$";
     private static final String DEFAULT_ADMIN_EMAIL = "admin@example.com";
 
-    private static void initDatabase() throws SQLException {
+    public static void initDatabase() throws SQLException {
         try {
             Files.createDirectories(DATA_DIR);
         } catch (IOException ex) {
