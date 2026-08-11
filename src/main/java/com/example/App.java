@@ -108,7 +108,16 @@ public class App {
                     "label TEXT NOT NULL UNIQUE, " +
                     "created_at TEXT NOT NULL)"
             );
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_work_items (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "nav_option_id INTEGER NOT NULL, " +
+                    "item_name TEXT NOT NULL, " +
+                    "status TEXT NOT NULL DEFAULT 'Not started', " +
+                    "UNIQUE(nav_option_id, item_name), " +
+                    "FOREIGN KEY(nav_option_id) REFERENCES nav_options(id) ON DELETE CASCADE)"
+            );
         }
+        ensureDefaultWorkItemsForAllNavOptions();
         createDefaultAdminUser();
         // ensure role column reflects existing is_admin flags
         try (Connection connection = DriverManager.getConnection(DB_URL);
@@ -541,6 +550,22 @@ public class App {
         }
     }
 
+    private static final String[] DEFAULT_WORK_ITEMS = {
+            "Fiber Laying",
+            "PTA",
+            "STA",
+            "LAN Cabling",
+            "Media Center"
+    };
+
+    private static final String[] WORK_ITEM_STATUSES = {
+            "Not started",
+            "In Progress",
+            "50% Complete",
+            "75% Complete",
+            "Completed"
+    };
+
     private static void handleCustomPage(HttpExchange exchange) throws IOException {
         String username = getSessionUsername(exchange);
         if (username == null) {
@@ -587,10 +612,55 @@ public class App {
                 return;
             }
 
-            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.role, option, navOptions));
+            ensureDefaultWorkItems(optionId);
+
+            if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                handleCustomPageStatusPost(exchange, optionId);
+                return;
+            }
+
+            java.util.List<WorkItem> workItems = listWorkItems(optionId);
+            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.role, option, navOptions, workItems));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the page right now."));
         }
+    }
+
+    private static void handleCustomPageStatusPost(HttpExchange exchange, int optionId) throws IOException {
+        String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Map<String, String> form = parseFormData(requestBody);
+        String itemName = form.getOrDefault("itemName", "").trim();
+        String status = form.getOrDefault("status", "").trim();
+
+        if (itemName.isEmpty() || !isValidWorkItemName(itemName) || !isValidWorkItemStatus(status)) {
+            redirect(exchange, "/page?id=" + optionId);
+            return;
+        }
+
+        try {
+            updateWorkItemStatus(optionId, itemName, status);
+        } catch (SQLException ignored) {
+            // fall through to redirect
+        }
+        redirect(exchange, "/page?id=" + optionId);
+    }
+
+    private static boolean isValidWorkItemName(String itemName) {
+        for (String item : DEFAULT_WORK_ITEMS) {
+            if (item.equals(itemName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isValidWorkItemStatus(String status) {
+        for (String value : WORK_ITEM_STATUSES) {
+            if (value.equals(status)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // --- Users list and edit UI/handlers ---
@@ -870,6 +940,24 @@ public class App {
             stmt.setString(2, Instant.now().toString());
             stmt.executeUpdate();
         }
+        NavOption created = findNavOptionByLabelExact(label);
+        if (created != null) {
+            ensureDefaultWorkItems(created.id);
+        }
+    }
+
+    private static NavOption findNavOptionByLabelExact(String label) throws SQLException {
+        String sql = "SELECT id, label FROM nav_options WHERE label = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
+            try (var rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new NavOption(rs.getInt("id"), rs.getString("label"));
+            }
+        }
     }
 
     private static void updateNavOption(int id, String label) throws SQLException {
@@ -883,10 +971,86 @@ public class App {
     }
 
     private static void deleteNavOption(int id) throws SQLException {
-        String sql = "DELETE FROM nav_options WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL)) {
+            try (PreparedStatement deleteItems = connection.prepareStatement("DELETE FROM nav_work_items WHERE nav_option_id = ?")) {
+                deleteItems.setInt(1, id);
+                deleteItems.executeUpdate();
+            }
+            try (PreparedStatement deleteOption = connection.prepareStatement("DELETE FROM nav_options WHERE id = ?")) {
+                deleteOption.setInt(1, id);
+                deleteOption.executeUpdate();
+            }
+        }
+    }
+
+    private static class WorkItem {
+        final String name;
+        final String status;
+
+        WorkItem(String name, String status) {
+            this.name = name;
+            this.status = status;
+        }
+    }
+
+    private static void ensureDefaultWorkItemsForAllNavOptions() throws SQLException {
+        for (NavOption option : listNavOptions()) {
+            ensureDefaultWorkItems(option.id);
+        }
+    }
+
+    private static void ensureDefaultWorkItems(int navOptionId) throws SQLException {
+        String sql = "INSERT OR IGNORE INTO nav_work_items (nav_option_id, item_name, status) VALUES (?, ?, ?)";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setInt(1, id);
+            for (String itemName : DEFAULT_WORK_ITEMS) {
+                stmt.setInt(1, navOptionId);
+                stmt.setString(2, itemName);
+                stmt.setString(3, "Not started");
+                stmt.addBatch();
+            }
+            stmt.executeBatch();
+        }
+    }
+
+    private static java.util.List<WorkItem> listWorkItems(int navOptionId) throws SQLException {
+        String sql = "SELECT item_name, status FROM nav_work_items WHERE nav_option_id = ? ORDER BY id ASC";
+        var list = new java.util.ArrayList<WorkItem>();
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, navOptionId);
+            try (var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new WorkItem(rs.getString("item_name"), rs.getString("status")));
+                }
+            }
+        }
+
+        if (list.isEmpty()) {
+            ensureDefaultWorkItems(navOptionId);
+            return listWorkItems(navOptionId);
+        }
+
+        // Keep display order matching DEFAULT_WORK_ITEMS
+        var ordered = new java.util.ArrayList<WorkItem>();
+        for (String expected : DEFAULT_WORK_ITEMS) {
+            for (WorkItem item : list) {
+                if (expected.equals(item.name)) {
+                    ordered.add(item);
+                    break;
+                }
+            }
+        }
+        return ordered.isEmpty() ? list : ordered;
+    }
+
+    private static void updateWorkItemStatus(int navOptionId, String itemName, String status) throws SQLException {
+        String sql = "UPDATE nav_work_items SET status = ? WHERE nav_option_id = ? AND item_name = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, status);
+            stmt.setInt(2, navOptionId);
+            stmt.setString(3, itemName);
             stmt.executeUpdate();
         }
     }
@@ -1781,19 +1945,47 @@ public class App {
                 "</div></div></main></div></body></html>";
     }
 
-    private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions) {
+    private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions, java.util.List<WorkItem> workItems) {
+        StringBuilder itemsHtml = new StringBuilder();
+        itemsHtml.append("<div class=\"work-items\"><table class=\"work-table\"><thead><tr><th>Work Item</th><th>Status</th></tr></thead><tbody>");
+        for (WorkItem item : workItems) {
+            itemsHtml.append("<tr>")
+                    .append("<td class=\"work-name\">").append(escapeHtml(item.name)).append("</td>")
+                    .append("<td class=\"work-status\">")
+                    .append("<form class=\"status-form\" action=\"/page?id=").append(option.id).append("\" method=\"post\">")
+                    .append("<input type=\"hidden\" name=\"itemName\" value=\"").append(escapeHtml(item.name)).append("\"/>")
+                    .append("<select name=\"status\" onchange=\"this.form.submit()\">");
+            for (String status : WORK_ITEM_STATUSES) {
+                itemsHtml.append("<option value=\"").append(escapeHtml(status)).append("\"")
+                        .append(status.equals(item.status) ? " selected" : "")
+                        .append(">").append(escapeHtml(status)).append("</option>");
+            }
+            itemsHtml.append("</select></form></td></tr>");
+        }
+        itemsHtml.append("</tbody></table></div>");
+
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>" + escapeHtml(option.label) + "</title>" +
                 "<style>" + sidebarLayoutStyles() +
                 " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
-                " .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
+                " .card{max-width:900px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
+                " .work-items{margin-top:1.5rem;}" +
+                " .work-table{width:100%;border-collapse:collapse;}" +
+                " .work-table th,.work-table td{padding:0.85rem 0.75rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
+                " .work-table th{font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;}" +
+                " .work-name{font-weight:600;font-size:0.95rem;}" +
+                " .status-form{margin:0;}" +
+                " .status-form select{min-width:180px;padding:0.5rem 0.75rem;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:#1e293b;color:#f8fafc;font-size:0.9rem;}" +
+                " .status-form select option{background:#fff;color:#0f172a;}" +
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(username, userRole, navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
-                "<div class=\"card\"><h1 style=\"margin:0;\">Welcome to " + escapeHtml(option.label) + "</h1></div>" +
-                "</main></div></body></html>";
+                "<div class=\"card\"><h1 style=\"margin:0 0 0.25rem;\">Welcome to " + escapeHtml(option.label) + "</h1>" +
+                "<p style=\"margin:0;opacity:0.85;\">Track progress for the fixed work items below.</p>" +
+                itemsHtml +
+                "</div></main></div></body></html>";
     }
 
     private static String buildProfilePage(String username, String firstName, String lastName, String email, String message) {
