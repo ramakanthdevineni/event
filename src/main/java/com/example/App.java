@@ -388,21 +388,29 @@ public class App {
         Map<String, String> formData = parseFormData(requestBody);
         String label = formData.getOrDefault("label", "").trim();
 
+        java.util.List<NavOption> navOptions;
         try {
-            java.util.List<NavOption> navOptions = listNavOptions();
+            navOptions = listNavOptions();
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load navigation options right now."));
+            return;
+        }
+
+        try {
             if (label.isEmpty()) {
                 sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option."));
                 return;
             }
 
             saveNavOption(label);
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", listNavOptions(), "Navigation option \"" + label + "\" added successfully."));
+            navOptions = listNavOptions();
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + label + "\" added successfully."));
         } catch (SQLException ex) {
             String message = ex.getMessage();
             if (message != null && message.contains("UNIQUE")) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, listNavOptions(), "A navigation option with that name already exists."));
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists."));
             } else {
-                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, listNavOptions(), "Unable to add the navigation option. Please try again later."));
+                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to add the navigation option. Please try again later."));
             }
         }
     }
