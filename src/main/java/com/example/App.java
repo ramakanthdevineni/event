@@ -28,7 +28,11 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -117,7 +121,8 @@ public class App {
                     "created_at TEXT NOT NULL)"
             );
             ensureUserTableColumns(connection);
-            // add role column for clearer role semantics (admin/user)
+            // role column stores one or more roles as a comma-separated list (e.g. "user" or "Jeddah,Riyadh").
+            // Existing single-role values remain valid after upgrade.
             addRoleColumnIfMissing(connection);
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_options (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
@@ -359,7 +364,7 @@ public class App {
                 return;
             }
             java.util.List<NavOption> navOptions = listNavOptions();
-            if (!isAdminRole(user.role) && !isStandardUserRole(user.role)) {
+            if (!hasAdminRole(user.role) && !hasUserRole(user.role)) {
                 redirect(exchange, resolveHomePath(user, navOptions));
                 return;
             }
@@ -1107,7 +1112,7 @@ public class App {
                 redirect(exchange, "/logout");
                 return;
             }
-            if (!isAdminRole(current.role) && !isStandardUserRole(current.role)) {
+            if (!hasAdminRole(current.role) && !hasUserRole(current.role)) {
                 java.util.List<NavOption> navOptions = listNavOptions();
                 redirect(exchange, resolveHomePath(current, navOptions));
                 return;
@@ -1162,6 +1167,8 @@ public class App {
 
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<String, String> form = parseFormData(body);
+        List<String> selectedRoles = normalizeRoles(parseFormValues(body, "role"));
+        form.put("role", serializeRoles(selectedRoles));
         String action = form.getOrDefault("action", "update").trim().toLowerCase();
         String username = form.getOrDefault("username", "").trim();
         String currentUser = getSessionUsername(exchange);
@@ -1182,14 +1189,14 @@ public class App {
         }
 
         if ("update-role".equals(action)) {
-            handleUpdateUserRolePost(exchange, form, username, currentUser);
+            handleUpdateUserRolePost(exchange, selectedRoles, username, currentUser);
             return;
         }
 
         String firstName = form.getOrDefault("firstName", "").trim();
         String lastName = form.getOrDefault("lastName", "").trim();
         String email = form.getOrDefault("email", "").trim();
-        String role = form.getOrDefault("role", "user").trim();
+        String role = serializeRoles(selectedRoles);
 
         if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
             try {
@@ -1215,7 +1222,7 @@ public class App {
 
         try {
             var navOptions = listNavOptions();
-            if (!isValidRole(role, navOptions)) {
+            if (!isValidRoles(selectedRoles, navOptions)) {
                 var users = listAllUsers();
                 UserRecord cur = findUserByUsername(currentUser);
                 sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", currentUser, cur != null ? cur.firstName : "", "Invalid role selected.", navOptions));
@@ -1298,12 +1305,12 @@ public class App {
         }
     }
 
-    private static void handleUpdateUserRolePost(HttpExchange exchange, Map<String, String> form, String username, String currentUser) throws IOException {
-        String role = form.getOrDefault("role", "user").trim();
+    private static void handleUpdateUserRolePost(HttpExchange exchange, List<String> selectedRoles, String username, String currentUser) throws IOException {
+        String role = serializeRoles(selectedRoles);
 
         try {
             var navOptions = listNavOptions();
-            if (!isValidRole(role, navOptions)) {
+            if (!isValidRoles(selectedRoles, navOptions)) {
                 redirectUsersNotice(exchange, "Invalid role selected.");
                 return;
             }
@@ -1315,7 +1322,7 @@ public class App {
             }
 
             updateUserRole(username, role);
-            redirectUsersNotice(exchange, "Role updated for \"" + target.firstName + " " + target.lastName + "\".");
+            redirectUsersNotice(exchange, "Roles updated for \"" + target.firstName + " " + target.lastName + "\".");
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user role."));
         }
@@ -1759,21 +1766,66 @@ public class App {
     }
 
     private static void updateUsersRoleByLabel(String oldLabel, String newLabel) throws SQLException {
-        String sql = "UPDATE users SET role = ? WHERE role = ?";
+        List<String[]> updates = new ArrayList<>();
         try (Connection connection = DriverManager.getConnection(DB_URL);
-             PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, newLabel);
-            stmt.setString(2, oldLabel);
-            stmt.executeUpdate();
+             PreparedStatement select = connection.prepareStatement("SELECT username, role FROM users");
+             var rs = select.executeQuery()) {
+            while (rs.next()) {
+                List<String> roles = parseRoles(rs.getString("role"));
+                boolean changed = false;
+                for (int i = 0; i < roles.size(); i++) {
+                    if (roles.get(i).equalsIgnoreCase(oldLabel)) {
+                        roles.set(i, newLabel);
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    String serialized = serializeRoles(roles);
+                    updates.add(new String[]{rs.getString("username"), serialized, hasAdminRole(serialized) ? "1" : "0"});
+                }
+            }
+        }
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement update = connection.prepareStatement("UPDATE users SET role = ?, is_admin = ? WHERE username = ?")) {
+            for (String[] row : updates) {
+                update.setString(1, row[1]);
+                update.setInt(2, "1".equals(row[2]) ? 1 : 0);
+                update.setString(3, row[0]);
+                update.executeUpdate();
+            }
         }
     }
 
     private static void resetUsersRoleByLabel(String label) throws SQLException {
-        String sql = "UPDATE users SET role = 'user', is_admin = 0 WHERE role = ?";
+        List<String[]> updates = new ArrayList<>();
         try (Connection connection = DriverManager.getConnection(DB_URL);
-             PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, label);
-            stmt.executeUpdate();
+             PreparedStatement select = connection.prepareStatement("SELECT username, role FROM users");
+             var rs = select.executeQuery()) {
+            while (rs.next()) {
+                List<String> roles = parseRoles(rs.getString("role"));
+                List<String> filtered = new ArrayList<>();
+                boolean changed = false;
+                for (String role : roles) {
+                    if (role.equalsIgnoreCase(label)) {
+                        changed = true;
+                    } else {
+                        filtered.add(role);
+                    }
+                }
+                if (changed) {
+                    String serialized = serializeRoles(filtered);
+                    updates.add(new String[]{rs.getString("username"), serialized, hasAdminRole(serialized) ? "1" : "0"});
+                }
+            }
+        }
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement update = connection.prepareStatement("UPDATE users SET role = ?, is_admin = ? WHERE username = ?")) {
+            for (String[] row : updates) {
+                update.setString(1, row[1]);
+                update.setInt(2, "1".equals(row[2]) ? 1 : 0);
+                update.setString(3, row[0]);
+                update.executeUpdate();
+            }
         }
     }
 
@@ -1793,7 +1845,9 @@ public class App {
 
     private static String buildSidebarHtml(String username, String userRole, java.util.List<NavOption> navOptions, String navItemClass) {
         StringBuilder nav = new StringBuilder();
-        if (isAdminRole(userRole)) {
+        // Admin => full nav. "user" alone => dashboard/users/mapview. Venue roles may be combined
+        // (and optionally with "user") to grant access to each matching venue page.
+        if (hasAdminRole(userRole)) {
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/admin-panel\">Admin Panel</a>");
@@ -1803,14 +1857,17 @@ public class App {
                 nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
                         .append(escapeHtml(option.label)).append("</a>");
             }
-        } else if (isStandardUserRole(userRole)) {
-            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
-            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
-            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
         } else {
-            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
-            NavOption matched = findNavOptionByLabel(userRole, navOptions);
-            if (matched != null) {
+            List<NavOption> venueMatches = matchedVenueOptions(userRole, navOptions);
+            boolean standardAccess = hasUserRole(userRole) || venueMatches.isEmpty();
+            if (standardAccess) {
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
+            } else {
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
+            }
+            for (NavOption matched : venueMatches) {
                 nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(matched.id).append("\">")
                         .append(escapeHtml(matched.label)).append("</a>");
             }
@@ -1819,19 +1876,139 @@ public class App {
                 "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside>";
     }
 
+    // Roles are stored comma-separated in users.role. Admin grants full access; venue labels
+    // grant those custom pages; "user" alone keeps dashboard/users/mapview access.
+    private static List<String> parseRoles(String rolesCsv) {
+        List<String> roles = new ArrayList<>();
+        if (rolesCsv == null || rolesCsv.isBlank()) {
+            return roles;
+        }
+        for (String part : rolesCsv.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                roles.add(trimmed);
+            }
+        }
+        return roles;
+    }
+
+    private static List<String> normalizeRoles(List<String> roles) {
+        LinkedHashSet<String> unique = new LinkedHashSet<>();
+        if (roles != null) {
+            for (String role : roles) {
+                if (role == null) {
+                    continue;
+                }
+                String trimmed = role.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                String key = trimmed.toLowerCase(Locale.ROOT);
+                boolean exists = false;
+                for (String existing : unique) {
+                    if (existing.equalsIgnoreCase(trimmed)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    if ("admin".equals(key)) {
+                        unique.add("admin");
+                    } else if ("user".equals(key)) {
+                        unique.add("user");
+                    } else {
+                        unique.add(trimmed);
+                    }
+                }
+            }
+        }
+        if (unique.isEmpty()) {
+            unique.add("user");
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private static String serializeRoles(List<String> roles) {
+        return String.join(",", normalizeRoles(roles));
+    }
+
+    private static boolean roleListContains(List<String> roles, String target) {
+        if (target == null) {
+            return false;
+        }
+        for (String role : roles) {
+            if (target.equalsIgnoreCase(role)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasAdminRole(String rolesCsv) {
+        return roleListContains(parseRoles(rolesCsv), "admin");
+    }
+
+    private static boolean hasUserRole(String rolesCsv) {
+        List<String> roles = parseRoles(rolesCsv);
+        if (roles.isEmpty()) {
+            return true;
+        }
+        return roleListContains(roles, "user");
+    }
+
     private static boolean isAdminRole(String role) {
-        return "admin".equalsIgnoreCase(role);
+        return hasAdminRole(role);
     }
 
     private static boolean isStandardUserRole(String role) {
-        return role == null || role.isEmpty() || "user".equalsIgnoreCase(role);
+        List<String> roles = parseRoles(role);
+        if (roles.isEmpty()) {
+            return true;
+        }
+        if (hasAdminRole(role)) {
+            return false;
+        }
+        for (String r : roles) {
+            if (!"user".equalsIgnoreCase(r)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isValidRole(String role, java.util.List<NavOption> navOptions) {
-        if (isAdminRole(role) || isStandardUserRole(role)) {
+        if (role == null || role.isBlank()) {
+            return false;
+        }
+        if ("admin".equalsIgnoreCase(role) || "user".equalsIgnoreCase(role)) {
             return true;
         }
         return findNavOptionByLabel(role, navOptions) != null;
+    }
+
+    private static boolean isValidRoles(List<String> roles, java.util.List<NavOption> navOptions) {
+        List<String> normalized = normalizeRoles(roles);
+        for (String role : normalized) {
+            if (!isValidRole(role, navOptions)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<NavOption> matchedVenueOptions(String rolesCsv, java.util.List<NavOption> navOptions) {
+        List<NavOption> matched = new ArrayList<>();
+        LinkedHashSet<Integer> seen = new LinkedHashSet<>();
+        for (String role : parseRoles(rolesCsv)) {
+            if ("admin".equalsIgnoreCase(role) || "user".equalsIgnoreCase(role)) {
+                continue;
+            }
+            NavOption option = findNavOptionByLabel(role, navOptions);
+            if (option != null && seen.add(option.id)) {
+                matched.add(option);
+            }
+        }
+        return matched;
     }
 
     private static NavOption findNavOptionByLabel(String label, java.util.List<NavOption> navOptions) {
@@ -1847,48 +2024,58 @@ public class App {
     }
 
     private static boolean canAccessCustomPage(UserRecord user, NavOption option) {
-        if (isAdminRole(user.role)) {
+        if (hasAdminRole(user.role)) {
             return true;
         }
-        if (isStandardUserRole(user.role)) {
-            return false;
+        for (String role : parseRoles(user.role)) {
+            if (option.label.equalsIgnoreCase(role)) {
+                return true;
+            }
         }
-        return option.label.equalsIgnoreCase(user.role);
+        return false;
     }
 
     private static String resolveHomePath(UserRecord user, java.util.List<NavOption> navOptions) {
-        if (isAdminRole(user.role) || isStandardUserRole(user.role)) {
+        if (hasAdminRole(user.role) || roleListContains(parseRoles(user.role), "user") || isStandardUserRole(user.role)) {
             return "/dashboard";
         }
-        NavOption matched = findNavOptionByLabel(user.role, navOptions);
-        return matched != null ? "/page?id=" + matched.id : "/dashboard";
+        List<NavOption> venues = matchedVenueOptions(user.role, navOptions);
+        return venues.isEmpty() ? "/dashboard" : "/page?id=" + venues.get(0).id;
     }
 
     private static String formatRoleDisplay(String role) {
-        if (role == null || role.isEmpty() || "user".equalsIgnoreCase(role)) {
-            return "User";
+        List<String> roles = normalizeRoles(parseRoles(role));
+        List<String> labels = new ArrayList<>();
+        for (String r : roles) {
+            if ("user".equalsIgnoreCase(r)) {
+                labels.add("User");
+            } else if ("admin".equalsIgnoreCase(r)) {
+                labels.add("Admin");
+            } else {
+                labels.add(r);
+            }
         }
-        if ("admin".equalsIgnoreCase(role)) {
-            return "Admin";
-        }
-        return role;
+        return String.join(", ", labels);
     }
 
-    private static String buildRoleOptionsHtml(String selectedRole, java.util.List<NavOption> navOptions) {
-        String normalizedSelected = selectedRole == null || selectedRole.isEmpty() ? "user" : selectedRole;
+    private static String buildRoleCheckboxesHtml(String selectedRolesCsv, java.util.List<NavOption> navOptions, String idPrefix) {
+        List<String> selected = normalizeRoles(parseRoles(selectedRolesCsv));
         StringBuilder options = new StringBuilder();
-        options.append(roleOption("user", "User", normalizedSelected));
-        options.append(roleOption("admin", "Admin", normalizedSelected));
+        options.append(roleCheckbox("user", "User", selected, idPrefix));
+        options.append(roleCheckbox("admin", "Admin", selected, idPrefix));
         for (NavOption option : navOptions) {
-            options.append(roleOption(option.label, option.label, normalizedSelected));
+            options.append(roleCheckbox(option.label, option.label, selected, idPrefix));
         }
-        return options.toString();
+        return "<div class=\"role-checks\">" + options + "</div>";
     }
 
-    private static String roleOption(String value, String label, String selectedRole) {
-        return "<option value=\"" + escapeHtml(value) + "\"" +
-                (value.equalsIgnoreCase(selectedRole) ? " selected" : "") +
-                ">" + escapeHtml(label) + "</option>";
+    private static String roleCheckbox(String value, String label, List<String> selectedRoles, String idPrefix) {
+        boolean checked = roleListContains(selectedRoles, value);
+        String id = escapeHtml(idPrefix + "-" + value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-"));
+        return "<label class=\"role-check\" for=\"" + id + "\">" +
+                "<input type=\"checkbox\" id=\"" + id + "\" name=\"role\" value=\"" + escapeHtml(value) + "\"" +
+                (checked ? " checked" : "") + "/>" +
+                "<span>" + escapeHtml(label) + "</span></label>";
     }
 
     private static String sidebarLayoutStyles() {
@@ -1966,12 +2153,13 @@ public class App {
     }
 
     private static boolean updateUserRole(String username, String role) throws SQLException {
-        boolean isAdmin = isAdminRole(role);
+        String serialized = serializeRoles(parseRoles(role));
+        boolean isAdmin = hasAdminRole(serialized);
         String sql = "UPDATE users SET is_admin = ?, role = ? WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setInt(1, isAdmin ? 1 : 0);
-            stmt.setString(2, role);
+            stmt.setString(2, serialized);
             stmt.setString(3, username);
             return stmt.executeUpdate() > 0;
         }
@@ -1997,7 +2185,8 @@ public class App {
     }
 
     private static boolean updateUserDetails(String username, String firstName, String lastName, String email, String role) throws SQLException {
-        boolean isAdmin = isAdminRole(role);
+        String serialized = serializeRoles(parseRoles(role));
+        boolean isAdmin = hasAdminRole(serialized);
         String sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, is_admin = ?, role = ? WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -2005,7 +2194,7 @@ public class App {
             stmt.setString(2, lastName);
             stmt.setString(3, email);
             stmt.setInt(4, isAdmin ? 1 : 0);
-            stmt.setString(5, role);
+            stmt.setString(5, serialized);
             stmt.setString(6, username);
             int updated = stmt.executeUpdate();
             return updated > 0;
@@ -2024,16 +2213,15 @@ public class App {
 
             String roleCell;
             if (currentIsAdmin) {
+                String roleIdPrefix = "role-" + u.username.hashCode();
                 roleCell = "<form class=\"role-form\" action=\"/users\" method=\"post\">" +
                         "<input type=\"hidden\" name=\"action\" value=\"update-role\"/>" +
                         "<input type=\"hidden\" name=\"username\" value=\"" + escapeHtml(u.username) + "\"/>" +
-                        "<select name=\"role\">" +
-                        buildRoleOptionsHtml(roleSelected, navOptions) +
-                        "</select>" +
+                        buildRoleCheckboxesHtml(roleSelected, navOptions, roleIdPrefix) +
                         "<button type=\"submit\" class=\"btn-sm\">Save</button>" +
                         "</form>";
             } else {
-                roleCell = "<select disabled><option selected>" + escapeHtml(formatRoleDisplay(roleSelected)) + "</option></select>";
+                roleCell = "<span class=\"role-display\">" + escapeHtml(formatRoleDisplay(roleSelected)) + "</span>";
             }
 
             String statusCell = u.enabled
@@ -2116,8 +2304,8 @@ public class App {
             String em = escapeHtml(editData.getOrDefault("email", ""));
             String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
             String roleSelected = roleVal == null || roleVal.isEmpty() ? "user" : roleVal;
-            String roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\">" +
-                    buildRoleOptionsHtml(roleSelected, navOptions) + "</select>";
+            String roleControl = "<div class=\"role-field\"><span class=\"role-label\">Roles</span>" +
+                    buildRoleCheckboxesHtml(roleSelected, navOptions, "edit-role") + "</div>";
             String formFeedback = message == null ? "" : "<p class=\"form-feedback\">" + escapeHtml(message) + "</p>";
 
             editPanel = "<div class=\"users-edit-panel\"><form class=\"edit-form\" action=\"/users\" method=\"post\">" +
@@ -2184,8 +2372,13 @@ public class App {
                 ".status-badge{display:inline-block;padding:0.2rem 0.55rem;border-radius:999px;font-size:0.72rem;font-weight:600;}" +
                 ".status-active{background:rgba(34,197,94,0.2);color:#86efac;}" +
                 ".status-disabled{background:rgba(239,68,68,0.2);color:#fca5a5;}" +
-                ".role-form{display:flex;gap:0.35rem;align-items:center;margin:0;}" +
-                ".role-form select{font-size:0.78rem;padding:0.35rem 1.5rem 0.35rem 0.55rem;}" +
+                ".role-form{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:flex-start;margin:0;}" +
+                ".role-checks{display:flex;flex-wrap:wrap;gap:0.35rem 0.65rem;align-items:center;}" +
+                ".role-check{display:inline-flex;align-items:center;gap:0.3rem;font-size:0.75rem;opacity:0.95;cursor:pointer;}" +
+                ".role-check input{margin:0;accent-color:#2563eb;}" +
+                ".role-field{grid-column:1/-1;}" +
+                ".role-label{display:block;font-size:0.95rem;opacity:0.9;margin-bottom:0.4rem;}" +
+                ".role-display{font-size:0.78rem;}" +
                 ".user-actions{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;}" +
                 ".user-action-form{display:inline;margin:0;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
@@ -2258,7 +2451,8 @@ public class App {
 
         try {
             updatePasswordAndClearResetFlag(username, password);
-            redirect(exchange, "/dashboard");
+            UserRecord user = findUserByUsername(username);
+            redirect(exchange, user == null ? "/dashboard" : resolveHomePath(user, listNavOptions()));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildChangePasswordPage("Unable to update your password right now. Please try again later."));
         }
@@ -2518,6 +2712,26 @@ public class App {
         }
 
         return result;
+    }
+
+    private static List<String> parseFormValues(String body, String key) {
+        List<String> values = new ArrayList<>();
+        if (body == null || body.isEmpty() || key == null || key.isEmpty()) {
+            return values;
+        }
+        String[] pairs = body.split("&");
+        for (String pair : pairs) {
+            String[] parts = pair.split("=", 2);
+            String pairKey = urlDecode(parts[0]);
+            if (!key.equals(pairKey)) {
+                continue;
+            }
+            String value = parts.length > 1 ? urlDecode(parts[1]) : "";
+            if (!value.isBlank()) {
+                values.add(value.trim());
+            }
+        }
+        return values;
     }
 
     private static String urlDecode(String value) {
@@ -2846,36 +3060,39 @@ public class App {
         return bestIndex;
     }
 
+    private static final double MAP_WIDTH = 860;
+    private static final double MAP_HEIGHT = 660;
+    private static final double MAP_PAD_X = 130;
+    private static final double MAP_PAD_Y = 80;
+    private static final double[] CITY_BOUNDARY_RX = {
+            42, 36, 34, 36, 34, 28, 30, 32, 30, 30, 28, 30, 30, 30, 34, 30, 38
+    };
+    private static final double[] CITY_BOUNDARY_RY = {
+            36, 30, 28, 30, 28, 24, 26, 28, 26, 26, 24, 26, 26, 26, 28, 26, 32
+    };
+
     private static double[] offsetMapPoint(double x, double y, int indexAtCity) {
         if (indexAtCity <= 0) {
             return new double[]{x, y};
         }
-        double angle = indexAtCity * (Math.PI * 2.0 / 6.0);
-        double radius = 24.0 + ((indexAtCity - 1) / 6) * 16.0;
+        double angle = (indexAtCity * 1.15) + 0.4;
+        double radius = 34.0 + (indexAtCity - 1) * 18.0;
         return new double[]{x + Math.cos(angle) * radius, y + Math.sin(angle) * radius};
     }
 
     private static double[] projectSaudiMap(double lat, double lon) {
-        double minLon = 34.4;
-        double maxLon = 55.7;
-        double minLat = 16.0;
-        double maxLat = 32.2;
-        double width = 720;
-        double height = 560;
-        double x = ((lon - minLon) / (maxLon - minLon)) * width;
-        double y = ((maxLat - lat) / (maxLat - minLat)) * height;
+        double minLon = 33.8;
+        double maxLon = 56.0;
+        double minLat = 15.8;
+        double maxLat = 32.4;
+        double innerW = MAP_WIDTH - (2 * MAP_PAD_X);
+        double innerH = MAP_HEIGHT - (2 * MAP_PAD_Y);
+        double x = MAP_PAD_X + ((lon - minLon) / (maxLon - minLon)) * innerW;
+        double y = MAP_PAD_Y + ((maxLat - lat) / (maxLat - minLat)) * innerH;
         return new double[]{x, y};
     }
 
-    private static String saudiOutlinePath() {
-        // Simplified border/coast points (lat, lon) projected into the same viewBox as city markers.
-        double[][] points = {
-                {29.35, 34.95}, {28.10, 34.60}, {26.20, 36.40}, {24.10, 37.80}, {22.20, 38.90},
-                {20.00, 40.40}, {18.20, 41.50}, {16.90, 42.55}, {16.40, 42.80}, {17.20, 44.40},
-                {17.80, 47.20}, {18.90, 50.20}, {19.80, 52.20}, {22.00, 55.20}, {24.50, 51.60},
-                {26.40, 50.20}, {27.50, 49.20}, {28.50, 48.40}, {29.10, 46.60}, {30.00, 44.00},
-                {31.20, 41.50}, {32.15, 39.20}, {31.80, 37.20}, {30.50, 36.00}
-        };
+    private static String pathFromLatLon(double[][] points) {
         StringBuilder path = new StringBuilder();
         for (int i = 0; i < points.length; i++) {
             double[] xy = projectSaudiMap(points[i][0], points[i][1]);
@@ -2886,11 +3103,88 @@ public class App {
         return path.toString();
     }
 
+    private static String saudiOutlinePath() {
+        double[][] points = {
+                {29.35, 34.95}, {28.10, 34.60}, {26.20, 36.40}, {24.10, 37.80}, {22.20, 38.90},
+                {20.00, 40.40}, {18.20, 41.50}, {16.90, 42.55}, {16.40, 42.80}, {17.20, 44.40},
+                {17.80, 47.20}, {18.90, 50.20}, {19.80, 52.20}, {22.00, 55.20}, {24.50, 51.60},
+                {26.40, 50.20}, {27.50, 49.20}, {28.50, 48.40}, {29.10, 46.60}, {30.00, 44.00},
+                {31.20, 41.50}, {32.15, 39.20}, {31.80, 37.20}, {30.50, 36.00}
+        };
+        return pathFromLatLon(points);
+    }
+
+    private static String cityBoundariesSvg(java.util.Set<Integer> activeCities, java.util.Map<Integer, String> cityColors) {
+        StringBuilder boundaries = new StringBuilder();
+        for (int i = 0; i < CITY_COORDS.length; i++) {
+            double[] xy = projectSaudiMap(CITY_COORDS[i][0], CITY_COORDS[i][1]);
+            boolean active = activeCities.contains(i);
+            String stroke = active ? cityColors.getOrDefault(i, "#93c5fd") : "rgba(147,197,253,0.45)";
+            String fill = active
+                    ? hexToRgba(cityColors.getOrDefault(i, "#93c5fd"), 0.18)
+                    : "rgba(147,197,253,0.05)";
+            boundaries.append("<ellipse class=\"city-boundary\" cx=\"")
+                    .append(String.format(java.util.Locale.US, "%.1f", xy[0]))
+                    .append("\" cy=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1]))
+                    .append("\" rx=\"").append(String.format(java.util.Locale.US, "%.1f", CITY_BOUNDARY_RX[i]))
+                    .append("\" ry=\"").append(String.format(java.util.Locale.US, "%.1f", CITY_BOUNDARY_RY[i]))
+                    .append("\" fill=\"").append(fill)
+                    .append("\" stroke=\"").append(stroke)
+                    .append("\" stroke-width=\"").append(active ? "2.5" : "1.2")
+                    .append("\" stroke-dasharray=\"").append(active ? "0" : "5 4")
+                    .append("\"/>");
+            if (!active) {
+                continue;
+            }
+            boundaries.append("<text x=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
+                    .append("\" y=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1] + CITY_BOUNDARY_RY[i] + 14))
+                    .append("\" text-anchor=\"middle\" class=\"city-boundary-label\">")
+                    .append(escapeHtml(CITY_ALIASES[i][0].substring(0, 1).toUpperCase(java.util.Locale.ROOT)
+                            + CITY_ALIASES[i][0].substring(1)))
+                    .append("</text>");
+        }
+        return boundaries.toString();
+    }
+
+    private static String hexToRgba(String hex, double alpha) {
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        if (h.length() != 6) {
+            return "rgba(147,197,253," + alpha + ")";
+        }
+        int r = Integer.parseInt(h.substring(0, 2), 16);
+        int g = Integer.parseInt(h.substring(2, 4), 16);
+        int b = Integer.parseInt(h.substring(4, 6), 16);
+        return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+    }
+
+    private static String markerLabelAnchor(double x) {
+        if (x < MAP_PAD_X + 40) {
+            return "start";
+        }
+        if (x > MAP_WIDTH - MAP_PAD_X - 40) {
+            return "end";
+        }
+        return "middle";
+    }
+
+    private static double markerLabelX(double x) {
+        if (x < MAP_PAD_X + 40) {
+            return x + 18;
+        }
+        if (x > MAP_WIDTH - MAP_PAD_X - 40) {
+            return x - 18;
+        }
+        return x;
+    }
+
     private static String buildMapviewPage(String username, String firstName, String userRole, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList) {
         StringBuilder markers = new StringBuilder();
         StringBuilder legendRows = new StringBuilder();
         StringBuilder unmapped = new StringBuilder();
         java.util.Map<Integer, Integer> markersPerCity = new java.util.HashMap<>();
+        java.util.Set<Integer> activeCities = new java.util.HashSet<>();
+        java.util.Map<Integer, String> cityColors = new java.util.HashMap<>();
+        java.util.List<double[]> placedPoints = new java.util.ArrayList<>();
 
         for (OptionProgress progress : progressList) {
             String color = progressColor(progress.overallPercent);
@@ -2907,16 +3201,43 @@ public class App {
                 continue;
             }
 
+            activeCities.add(cityIndex);
+            cityColors.putIfAbsent(cityIndex, color);
+
             int slot = markersPerCity.merge(cityIndex, 1, Integer::sum) - 1;
             double[] xy = projectSaudiMap(CITY_COORDS[cityIndex][0], CITY_COORDS[cityIndex][1]);
             xy = offsetMapPoint(xy[0], xy[1], slot);
+
+            // Nudge away from already placed markers to reduce overlap (e.g. Jeddah / Makkah).
+            for (int pass = 0; pass < 4; pass++) {
+                boolean moved = false;
+                for (double[] other : placedPoints) {
+                    double dx = xy[0] - other[0];
+                    double dy = xy[1] - other[1];
+                    double dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 46 && dist > 0.01) {
+                        double push = (46 - dist) / 2.0;
+                        xy[0] += (dx / dist) * push;
+                        xy[1] += (dy / dist) * push;
+                        moved = true;
+                    }
+                }
+                if (!moved) {
+                    break;
+                }
+            }
+            placedPoints.add(new double[]{xy[0], xy[1]});
+
+            String anchor = markerLabelAnchor(xy[0]);
+            double labelX = markerLabelX(xy[0]);
+            double labelY = xy[1] - 22 - (slot * 16);
             markers.append("<g class=\"venue-marker\">")
                     .append("<circle cx=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
                     .append("\" cy=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1]))
-                    .append("\" r=\"14\" fill=\"").append(color).append("\" stroke=\"#ffffff\" stroke-width=\"2\"/>")
-                    .append("<text x=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
-                    .append("\" y=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1] - 20))
-                    .append("\" text-anchor=\"middle\" class=\"marker-label\">")
+                    .append("\" r=\"12\" fill=\"").append(color).append("\" stroke=\"#ffffff\" stroke-width=\"2\"/>")
+                    .append("<text x=\"").append(String.format(java.util.Locale.US, "%.1f", labelX))
+                    .append("\" y=\"").append(String.format(java.util.Locale.US, "%.1f", labelY))
+                    .append("\" text-anchor=\"").append(anchor).append("\" class=\"marker-label\">")
                     .append(escapeHtml(progress.option.label))
                     .append(" - ").append(progress.overallPercent).append("%</text>")
                     .append("</g>");
@@ -2927,6 +3248,8 @@ public class App {
                 : "<div class=\"unmapped\"><h3>Venues without map location</h3><ul>" + unmapped + "</ul>" +
                 "<p class=\"hint\">Use a Saudi city name (for example Jeddah or Riyadh) as the venue name to place it on the map.</p></div>";
 
+        String viewBox = "0 0 " + ((int) MAP_WIDTH) + " " + ((int) MAP_HEIGHT);
+
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Mapview</title><style>" + sidebarLayoutStyles() +
                 " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
@@ -2936,8 +3259,16 @@ public class App {
                 " .legend-card{flex:1 1 240px;}" +
                 " .map-card h1,.legend-card h2{margin:0 0 0.75rem;}" +
                 " .map-card p{margin:0 0 1rem;opacity:0.9;}" +
-                " .map-svg{width:100%;height:auto;display:block;background:radial-gradient(circle at 30% 20%,#1e3a8a,#0f172a 70%);border-radius:12px;}" +
+                " .map-viewport{position:relative;border-radius:12px;overflow:hidden;background:radial-gradient(circle at 30% 20%,#1e3a8a,#0f172a 70%);touch-action:none;}" +
+                " .map-zoom-controls{position:absolute;top:12px;right:12px;z-index:2;display:flex;flex-direction:column;gap:0.4rem;}" +
+                " .map-zoom-controls button{width:36px;height:36px;border:none;border-radius:10px;background:rgba(15,23,42,0.85);color:#f8fafc;font-size:1.2rem;font-weight:700;cursor:pointer;line-height:1;}" +
+                " .map-zoom-controls button:hover{background:#2563eb;}" +
+                " .map-hint{margin:0.65rem 0 0;font-size:0.82rem;opacity:0.75;}" +
+                " .map-svg{width:100%;height:auto;display:block;cursor:grab;user-select:none;}" +
+                " .map-svg.dragging{cursor:grabbing;}" +
                 " .land{fill:#1d4ed8;stroke:#93c5fd;stroke-width:2;opacity:0.85;}" +
+                " .city-boundary{opacity:0.95;}" +
+                " .city-boundary-label{fill:#bfdbfe;font-size:11px;font-family:Arial,Helvetica,sans-serif;text-transform:capitalize;opacity:0.9;}" +
                 " .marker-label{fill:#f8fafc;font-size:13px;font-family:Arial,Helvetica,sans-serif;paint-order:stroke;stroke:#0f172a;stroke-width:3px;}" +
                 " .legend-table{width:100%;border-collapse:collapse;}" +
                 " .legend-table th,.legend-table td{padding:0.65rem 0.4rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);}" +
@@ -2962,10 +3293,18 @@ public class App {
                 "<span><i class=\"swatch\" style=\"background:#65a30d;\"></i>75-99%</span>" +
                 "<span><i class=\"swatch\" style=\"background:#16a34a;\"></i>100%</span>" +
                 "</div>" +
-                "<svg class=\"map-svg\" viewBox=\"0 0 720 560\" role=\"img\" aria-label=\"Map of Saudi Arabia with venue progress\">" +
+                "<div class=\"map-viewport\">" +
+                "<div class=\"map-zoom-controls\">" +
+                "<button type=\"button\" id=\"zoom-in\" title=\"Zoom in\" aria-label=\"Zoom in\">+</button>" +
+                "<button type=\"button\" id=\"zoom-out\" title=\"Zoom out\" aria-label=\"Zoom out\">&minus;</button>" +
+                "<button type=\"button\" id=\"zoom-reset\" title=\"Reset view\" aria-label=\"Reset view\">&#8634;</button>" +
+                "</div>" +
+                "<svg id=\"map-svg\" class=\"map-svg\" viewBox=\"" + viewBox + "\" role=\"img\" aria-label=\"Map of Saudi Arabia with venue progress\">" +
                 "<path class=\"land\" d=\"" + saudiOutlinePath() + "\"/>" +
+                cityBoundariesSvg(activeCities, cityColors) +
                 markers +
-                "</svg>" +
+                "</svg></div>" +
+                "<p class=\"map-hint\">Use + / &minus; or the mouse wheel to zoom. Drag the map to pan for a detailed view.</p>" +
                 unmappedHtml +
                 "</div>" +
                 "<div class=\"legend-card\"><h2>Venue Progress</h2>" +
@@ -2974,7 +3313,67 @@ public class App {
                         ? "<tr><td colspan=\"2\">No venues yet. Add venues in Admin Panel.</td></tr>"
                         : legendRows.toString()) +
                 "</tbody></table></div>" +
-                "</div></main></div></body></html>";
+                "</div></main></div>" +
+                mapZoomScript((int) MAP_WIDTH, (int) MAP_HEIGHT) +
+                "</body></html>";
+    }
+
+    private static String mapZoomScript(int baseWidth, int baseHeight) {
+        return "<script>(function(){" +
+                "var svg=document.getElementById('map-svg');" +
+                "if(!svg)return;" +
+                "var baseW=" + baseWidth + ",baseH=" + baseHeight + ";" +
+                "var minZoom=1,maxZoom=6;" +
+                "var vb={x:0,y:0,w:baseW,h:baseH};" +
+                "var dragging=false,lastX=0,lastY=0;" +
+                "function apply(){svg.setAttribute('viewBox',vb.x+' '+vb.y+' '+vb.w+' '+vb.h);}" +
+                "function clampView(){" +
+                "vb.w=Math.min(baseW,Math.max(baseW/maxZoom,vb.w));" +
+                "vb.h=vb.w*(baseH/baseW);" +
+                "vb.x=Math.min(baseW-vb.w,Math.max(0,vb.x));" +
+                "vb.y=Math.min(baseH-vb.h,Math.max(0,vb.y));" +
+                "}" +
+                "function zoomAt(factor,clientX,clientY){" +
+                "var rect=svg.getBoundingClientRect();" +
+                "var px=(clientX-rect.left)/rect.width;" +
+                "var py=(clientY-rect.top)/rect.height;" +
+                "var mx=vb.x+px*vb.w,my=vb.y+py*vb.h;" +
+                "var nextW=vb.w/factor,nextH=vb.h/factor;" +
+                "if(nextW>baseW){nextW=baseW;nextH=baseH;}" +
+                "if(nextW<baseW/maxZoom){nextW=baseW/maxZoom;nextH=baseH/maxZoom;}" +
+                "vb.w=nextW;vb.h=nextH;" +
+                "vb.x=mx-px*vb.w;vb.y=my-py*vb.h;" +
+                "clampView();apply();" +
+                "}" +
+                "function zoomCenter(factor){" +
+                "var rect=svg.getBoundingClientRect();" +
+                "zoomAt(factor,rect.left+rect.width/2,rect.top+rect.height/2);" +
+                "}" +
+                "document.getElementById('zoom-in').addEventListener('click',function(){zoomCenter(1.25);});" +
+                "document.getElementById('zoom-out').addEventListener('click',function(){zoomCenter(0.8);});" +
+                "document.getElementById('zoom-reset').addEventListener('click',function(){vb={x:0,y:0,w:baseW,h:baseH};apply();});" +
+                "svg.addEventListener('wheel',function(e){" +
+                "e.preventDefault();" +
+                "zoomAt(e.deltaY<0?1.2:0.85,e.clientX,e.clientY);" +
+                "},{passive:false});" +
+                "svg.addEventListener('pointerdown',function(e){" +
+                "if(e.button!==0)return;" +
+                "dragging=true;lastX=e.clientX;lastY=e.clientY;" +
+                "svg.classList.add('dragging');" +
+                "svg.setPointerCapture(e.pointerId);" +
+                "});" +
+                "svg.addEventListener('pointermove',function(e){" +
+                "if(!dragging)return;" +
+                "var rect=svg.getBoundingClientRect();" +
+                "var dx=(e.clientX-lastX)/rect.width*vb.w;" +
+                "var dy=(e.clientY-lastY)/rect.height*vb.h;" +
+                "vb.x-=dx;vb.y-=dy;lastX=e.clientX;lastY=e.clientY;" +
+                "clampView();apply();" +
+                "});" +
+                "function endDrag(e){dragging=false;svg.classList.remove('dragging');}" +
+                "svg.addEventListener('pointerup',endDrag);" +
+                "svg.addEventListener('pointercancel',endDrag);" +
+                "})();</script>";
     }
 
     private static String buildStatusPage(String username, String firstName, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList, OptionProgress selected) {
