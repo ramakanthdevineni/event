@@ -2410,9 +2410,10 @@ public class App {
                 roleCell = "<form class=\"role-form\" action=\"/users\" method=\"post\">" +
                         "<input type=\"hidden\" name=\"action\" value=\"update-role\"/>" +
                         "<input type=\"hidden\" name=\"username\" value=\"" + escapeHtml(u.username) + "\"/>" +
+                        "<div class=\"role-controls\">" +
                         buildRoleCheckboxesHtml(roleSelected, navOptions, roleIdPrefix) +
-                        "<button type=\"submit\" class=\"btn-sm\">Save</button>" +
-                        "</form>";
+                        "<button type=\"submit\" class=\"btn-sm role-save-btn\" title=\"Save roles\">Save</button>" +
+                        "</div></form>";
             } else {
                 roleCell = "<span class=\"role-display\">" + escapeHtml(formatRoleDisplay(roleSelected)) + "</span>";
             }
@@ -2545,42 +2546,50 @@ public class App {
                 ".users-list-toolbar{display:flex;justify-content:flex-end;margin-bottom:0.65rem;}" +
                 ".add-user-btn{padding:0.5rem 0.95rem;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;text-decoration:none;font-size:0.82rem;display:inline-flex;align-items:center;gap:0.45rem;transition:background 0.2s ease,transform 0.15s ease;}" +
                 ".add-user-btn:hover{background:#1d4ed8;transform:translateY(-1px);color:#fff;}" +
-                ".users-content{width:100%;}" +
+                ".users-content{width:100%;min-width:0;}" +
                 ".users-edit-panel{margin-bottom:1rem;padding:1.25rem 1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
                 ".users-edit-panel h3{margin:0 0 1rem;font-size:1.05rem;}" +
                 ".read-only-note{opacity:0.75;margin-top:1rem;font-size:0.85rem;}" +
                 ".form-feedback{color:#a5f3fc;font-weight:600;margin-top:0.5rem;}" +
-                ".user-search-bar{margin-bottom:1rem;}" +
+                ".user-search-bar{margin-bottom:0.75rem;}" +
                 ".user-search-bar input{width:100%;padding:0.65rem 0.85rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-size:0.85rem;box-sizing:border-box;}" +
                 ".user-search-bar input::placeholder{color:rgba(248,250,252,0.65);}" +
-                ".users-panel{border-radius:16px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
-                ".users-table{width:100%;border-collapse:collapse;font-size:0.82rem;}" +
-                ".users-table th,.users-table td{padding:0.55rem 0.7rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
-                ".users-table th{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;font-weight:600;}" +
+                ".users-panel{border-radius:16px;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);overflow:auto;max-height:calc(100vh - 220px);}" +
+                ".users-table{width:100%;border-collapse:separate;border-spacing:0;font-size:0.8rem;table-layout:fixed;}" +
+                ".users-table th,.users-table td{padding:0.45rem 0.65rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
+                ".users-table th{position:sticky;top:0;z-index:5;background:#1e3a8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:0.06em;opacity:1;font-weight:600;}" +
                 ".users-table tbody tr:hover{background:rgba(255,255,255,0.03);}" +
                 ".users-table tr.selected{background:rgba(255,255,255,0.08);}" +
                 ".users-table tr.user-disabled{opacity:0.65;}" +
-                ".name-cell{font-weight:600;font-size:0.82rem;}" +
-                ".email-cell{opacity:0.9;font-size:0.78rem;}" +
-                ".status-badge{display:inline-block;padding:0.2rem 0.55rem;border-radius:999px;font-size:0.72rem;font-weight:600;}" +
+                ".users-table th:nth-child(1),.users-table td.name-cell{width:18%;}" +
+                ".users-table th:nth-child(2),.users-table td.email-cell{width:22%;}" +
+                ".users-table th:nth-child(3),.users-table td.status-cell{width:10%;}" +
+                ".users-table th:nth-child(4),.users-table td.role-cell{width:28%;}" +
+                ".users-table th:nth-child(5),.users-table td.actions-cell{width:22%;}" +
+                ".name-cell{font-weight:600;font-size:0.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+                ".email-cell{opacity:0.9;font-size:0.76rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+                ".status-badge{display:inline-block;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.7rem;font-weight:600;}" +
                 ".status-active{background:rgba(34,197,94,0.2);color:#86efac;}" +
                 ".status-disabled{background:rgba(239,68,68,0.2);color:#fca5a5;}" +
-                ".role-form{display:flex;flex-direction:column;gap:0.4rem;align-items:stretch;margin:0;min-width:180px;}" +
-                ".role-dropdown{position:relative;width:100%;min-width:170px;}" +
-                ".role-dropdown-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:0.5rem;" +
-                "padding:0.45rem 0.65rem;border-radius:8px;border:1px solid rgba(255,255,255,0.22);background:#1e293b;color:#f8fafc;" +
-                "font-size:0.75rem;font-weight:500;cursor:pointer;text-align:left;}" +
+                ".role-cell{overflow:visible;}" +
+                ".role-form{margin:0;}" +
+                ".role-controls{display:flex;align-items:center;gap:0.4rem;min-width:0;}" +
+                ".role-save-btn{flex-shrink:0;padding:0.35rem 0.6rem;}" +
+                ".role-dropdown{position:relative;flex:1;min-width:0;}" +
+                ".role-dropdown-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:0.4rem;" +
+                "padding:0.35rem 0.55rem;border-radius:8px;border:1px solid rgba(255,255,255,0.22);background:#1e293b;color:#f8fafc;" +
+                "font-size:0.72rem;font-weight:500;cursor:pointer;text-align:left;min-height:2rem;}" +
                 ".role-dropdown-toggle:hover{background:#334155;}" +
                 ".role-dropdown.open .role-dropdown-toggle{border-color:#60a5fa;background:#1e3a5f;}" +
                 ".role-dropdown-summary{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
-                ".role-dropdown-caret{opacity:0.8;font-size:0.7rem;}" +
-                ".role-dropdown-panel{position:absolute;z-index:40;top:calc(100% + 4px);left:0;right:0;min-width:220px;" +
-                "max-height:240px;overflow:auto;padding:0.55rem;border-radius:10px;border:1px solid rgba(255,255,255,0.18);" +
-                "background:#0f172a;box-shadow:0 12px 28px rgba(0,0,0,0.35);}" +
+                ".role-dropdown-caret{opacity:0.8;font-size:0.7rem;flex-shrink:0;}" +
+                ".role-dropdown-panel{position:fixed;z-index:1000;width:260px;max-height:280px;display:flex;flex-direction:column;" +
+                "padding:0.55rem;border-radius:10px;border:1px solid rgba(255,255,255,0.18);" +
+                "background:#0f172a;box-shadow:0 16px 40px rgba(0,0,0,0.45);}" +
                 ".role-dropdown-search{width:100%;box-sizing:border-box;margin-bottom:0.45rem;padding:0.45rem 0.55rem;" +
-                "border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#fff;font-size:0.75rem;}" +
+                "border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#fff;font-size:0.75rem;flex-shrink:0;}" +
                 ".role-dropdown-search::placeholder{color:rgba(248,250,252,0.55);}" +
-                ".role-checks{display:flex;flex-direction:column;gap:0.25rem;}" +
+                ".role-checks{display:flex;flex-direction:column;gap:0.2rem;overflow:auto;min-height:0;flex:1;}" +
                 ".role-check{display:flex;align-items:center;gap:0.4rem;font-size:0.75rem;opacity:0.95;cursor:pointer;" +
                 "padding:0.28rem 0.35rem;border-radius:6px;}" +
                 ".role-check:hover{background:rgba(255,255,255,0.06);}" +
@@ -2590,9 +2599,8 @@ public class App {
                 ".role-field .role-dropdown{max-width:360px;}" +
                 ".role-label{display:block;font-size:0.95rem;opacity:0.9;margin-bottom:0.4rem;}" +
                 ".role-display{font-size:0.78rem;}" +
-                ".users-edit-panel .role-dropdown-panel{position:static;margin-top:0.4rem;max-height:280px;}" +
-                ".users-edit-panel .role-dropdown.open .role-dropdown-panel{display:block;}" +
-                ".user-actions{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;}" +
+                ".users-edit-panel .role-dropdown-panel{position:static;width:100%;max-width:360px;max-height:240px;margin-top:0.4rem;}" +
+                ".user-actions{display:flex;flex-wrap:nowrap;gap:0.3rem;align-items:center;}" +
                 ".user-action-form{display:inline;margin:0;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
                 ".edit-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;}" +
@@ -2613,6 +2621,7 @@ public class App {
                 "a{color:#cbd5e1;text-decoration:none;}" +
                 ".users-table a.button{padding:0.3rem 0.55rem;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;font-size:0.72rem;}" +
                 ".users-table a.button:hover{background:#1d4ed8;}" +
+                "@media (max-width:1100px){.users-table{table-layout:auto;}.user-actions{flex-wrap:wrap;}}" +
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentUserRole, navOptions, "user-item") + "<main class=\"main\">" +
                 headerHtml + feedback +
@@ -2635,6 +2644,19 @@ public class App {
                 "const summary=dropdown.querySelector('.role-dropdown-summary');" +
                 "if(summary){summary.textContent=labels.length?labels.join(', '):'Select roles...';}" +
                 "}" +
+                "function positionPanel(dropdown,panel,toggle){" +
+                "if(dropdown.closest('.users-edit-panel')){panel.style.top='';panel.style.left='';panel.style.width='';return;}" +
+                "const rect=toggle.getBoundingClientRect();" +
+                "const width=Math.max(rect.width,240);" +
+                "let left=rect.left;" +
+                "if(left+width>window.innerWidth-8){left=Math.max(8,window.innerWidth-width-8);}" +
+                "let top=rect.bottom+4;" +
+                "const maxH=280;" +
+                "if(top+Math.min(maxH,220)>window.innerHeight&&rect.top>maxH){top=Math.max(8,rect.top-maxH-4);}" +
+                "panel.style.top=top+'px';" +
+                "panel.style.left=left+'px';" +
+                "panel.style.width=width+'px';" +
+                "}" +
                 "function closeAll(except){" +
                 "document.querySelectorAll('.role-dropdown.open').forEach(function(dd){" +
                 "if(dd!==except){dd.classList.remove('open');" +
@@ -2654,7 +2676,7 @@ public class App {
                 "dropdown.classList.toggle('open',willOpen);" +
                 "panel.hidden=!willOpen;" +
                 "toggle.setAttribute('aria-expanded',willOpen?'true':'false');" +
-                "if(willOpen&&filter){filter.focus();}" +
+                "if(willOpen){positionPanel(dropdown,panel,toggle);if(filter){filter.focus();filter.select();}}" +
                 "});" +
                 "panel.addEventListener('click',function(e){e.stopPropagation();});" +
                 "if(filter){filter.addEventListener('input',function(){" +
@@ -2669,6 +2691,9 @@ public class App {
                 "updateSummary(dropdown);" +
                 "});" +
                 "document.addEventListener('click',function(){closeAll(null);});" +
+                "window.addEventListener('resize',function(){closeAll(null);});" +
+                "const panelScroll=document.querySelector('.users-panel');" +
+                "if(panelScroll){panelScroll.addEventListener('scroll',function(){closeAll(null);},{passive:true});}" +
                 "})();" +
                 "</script></body></html>";
     }
