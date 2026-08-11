@@ -207,7 +207,8 @@ public class App {
                 if (user.mustChangePassword) {
                     redirect(exchange, "/change-password");
                 } else {
-                    redirect(exchange, "/dashboard");
+                    java.util.List<NavOption> navOptions = listNavOptions();
+                    redirect(exchange, resolveHomePath(user, navOptions));
                 }
             }
         } catch (SQLException ex) {
@@ -232,7 +233,12 @@ public class App {
                 redirect(exchange, "/change-password");
                 return;
             }
-            sendHtmlResponse(exchange, 200, buildDashboardPage(user.firstName, username, user.isAdmin, listNavOptions()));
+            java.util.List<NavOption> navOptions = listNavOptions();
+            if (!isAdminRole(user.role) && !isStandardUserRole(user.role)) {
+                redirect(exchange, resolveHomePath(user, navOptions));
+                return;
+            }
+            sendHtmlResponse(exchange, 200, buildDashboardPage(user.firstName, username, user.role, navOptions));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load your dashboard right now."));
         }
@@ -455,7 +461,13 @@ public class App {
                 return;
             }
 
-            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.isAdmin, option, listNavOptions()));
+            java.util.List<NavOption> navOptions = listNavOptions();
+            if (!canAccessCustomPage(user, option)) {
+                redirect(exchange, resolveHomePath(user, navOptions));
+                return;
+            }
+
+            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.role, option, navOptions));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the page right now."));
         }
@@ -473,6 +485,11 @@ public class App {
             UserRecord current = findUserByUsername(currentUsername);
             if (current == null) {
                 redirect(exchange, "/logout");
+                return;
+            }
+            if (!isAdminRole(current.role) && !isStandardUserRole(current.role)) {
+                java.util.List<NavOption> navOptions = listNavOptions();
+                redirect(exchange, resolveHomePath(current, navOptions));
                 return;
             }
 
@@ -503,13 +520,13 @@ public class App {
                         editData.put("email", u.email);
                         editData.put("username", u.username);
                         editData.put("isAdmin", u.isAdmin ? "1" : "0");
-                        editData.put("role", u.isAdmin || "admin".equalsIgnoreCase(u.role) ? "admin" : "user");
+                        editData.put("role", u.role != null ? u.role : (u.isAdmin ? "admin" : "user"));
                         break;
                     }
                 }
             }
 
-            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, currentUsername, current.firstName, null, listNavOptions()));
+            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, current.role, currentUsername, current.firstName, null, listNavOptions()));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load users right now."));
         }
@@ -528,15 +545,25 @@ public class App {
         String firstName = form.getOrDefault("firstName", "").trim();
         String lastName = form.getOrDefault("lastName", "").trim();
         String email = form.getOrDefault("email", "").trim();
-        String role = form.getOrDefault("role", "user");
+        String role = form.getOrDefault("role", "user").trim();
 
         if (username.isEmpty() || firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
             try {
                 var users = listAllUsers();
+                var navOptions = listNavOptions();
                 String curUser = getSessionUsername(exchange);
                 String curFirst = "";
-                try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curUser, curFirst, "All fields are required.", listNavOptions()));
+                String curRole = "user";
+                try {
+                    UserRecord cur = findUserByUsername(curUser);
+                    if (cur != null) {
+                        curFirst = cur.firstName;
+                        curRole = cur.role;
+                    }
+                } catch (SQLException e) {
+                    curFirst = "";
+                }
+                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curRole, curUser, curFirst, "All fields are required.", navOptions));
             } catch (SQLException ex) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user."));
             }
@@ -544,7 +571,16 @@ public class App {
         }
 
         try {
-            boolean updated = updateUserDetails(username, firstName, lastName, email, "admin".equalsIgnoreCase(role));
+            var navOptions = listNavOptions();
+            if (!isValidRole(role, navOptions)) {
+                var users = listAllUsers();
+                String curUser = getSessionUsername(exchange);
+                UserRecord cur = findUserByUsername(curUser);
+                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", "Invalid role selected.", navOptions));
+                return;
+            }
+
+            boolean updated = updateUserDetails(username, firstName, lastName, email, role);
             if (updated) {
                 // Redirect on success to avoid confusing 400/200 behavior
                 redirect(exchange, "/users?edit=" + java.net.URLEncoder.encode(username, StandardCharsets.UTF_8));
@@ -553,20 +589,19 @@ public class App {
                 // No rows updated — show error to user
                 var users = listAllUsers();
                 String curUser = getSessionUsername(exchange);
-                String curFirst = "";
-                try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, "No changes were applied.", listNavOptions()));
+                UserRecord cur = findUserByUsername(curUser);
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", "No changes were applied.", navOptions));
                 return;
             }
         } catch (SQLException ex) {
             String msg = ex.getMessage();
             try {
                 var users = listAllUsers();
+                var navOptions = listNavOptions();
                 String feedback = (msg != null && msg.contains("UNIQUE")) ? "Email already in use." : "Unable to save changes.";
                 String curUser = getSessionUsername(exchange);
-                String curFirst = "";
-                try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, feedback, listNavOptions()));
+                UserRecord cur = findUserByUsername(curUser);
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", feedback, navOptions));
             } catch (SQLException inner) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to save changes."));
             }
@@ -634,19 +669,100 @@ public class App {
         return result;
     }
 
-    private static String buildSidebarHtml(String username, boolean isAdmin, java.util.List<NavOption> navOptions, String navItemClass) {
+    private static String buildSidebarHtml(String username, String userRole, java.util.List<NavOption> navOptions, String navItemClass) {
         StringBuilder nav = new StringBuilder();
-        nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
-        nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
-        if (isAdmin) {
+        if (isAdminRole(userRole)) {
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/admin-panel\">Admin Panel</a>");
-        }
-        for (NavOption option : navOptions) {
-            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
-                    .append(escapeHtml(option.label)).append("</a>");
+            for (NavOption option : navOptions) {
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
+                        .append(escapeHtml(option.label)).append("</a>");
+            }
+        } else if (isStandardUserRole(userRole)) {
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
+        } else {
+            NavOption matched = findNavOptionByLabel(userRole, navOptions);
+            if (matched != null) {
+                nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(matched.id).append("\">")
+                        .append(escapeHtml(matched.label)).append("</a>");
+            }
         }
         return "<aside class=\"sidebar\"><h2>Navigation</h2><nav>" + nav + "</nav><hr/>" +
                 "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside>";
+    }
+
+    private static boolean isAdminRole(String role) {
+        return "admin".equalsIgnoreCase(role);
+    }
+
+    private static boolean isStandardUserRole(String role) {
+        return role == null || role.isEmpty() || "user".equalsIgnoreCase(role);
+    }
+
+    private static boolean isValidRole(String role, java.util.List<NavOption> navOptions) {
+        if (isAdminRole(role) || isStandardUserRole(role)) {
+            return true;
+        }
+        return findNavOptionByLabel(role, navOptions) != null;
+    }
+
+    private static NavOption findNavOptionByLabel(String label, java.util.List<NavOption> navOptions) {
+        if (label == null) {
+            return null;
+        }
+        for (NavOption option : navOptions) {
+            if (option.label.equalsIgnoreCase(label)) {
+                return option;
+            }
+        }
+        return null;
+    }
+
+    private static boolean canAccessCustomPage(UserRecord user, NavOption option) {
+        if (isAdminRole(user.role)) {
+            return true;
+        }
+        if (isStandardUserRole(user.role)) {
+            return false;
+        }
+        return option.label.equalsIgnoreCase(user.role);
+    }
+
+    private static String resolveHomePath(UserRecord user, java.util.List<NavOption> navOptions) {
+        if (isAdminRole(user.role) || isStandardUserRole(user.role)) {
+            return "/dashboard";
+        }
+        NavOption matched = findNavOptionByLabel(user.role, navOptions);
+        return matched != null ? "/page?id=" + matched.id : "/dashboard";
+    }
+
+    private static String formatRoleDisplay(String role) {
+        if (role == null || role.isEmpty() || "user".equalsIgnoreCase(role)) {
+            return "User";
+        }
+        if ("admin".equalsIgnoreCase(role)) {
+            return "Admin";
+        }
+        return role;
+    }
+
+    private static String buildRoleOptionsHtml(String selectedRole, java.util.List<NavOption> navOptions) {
+        String normalizedSelected = selectedRole == null || selectedRole.isEmpty() ? "user" : selectedRole;
+        StringBuilder options = new StringBuilder();
+        options.append(roleOption("user", "User", normalizedSelected));
+        options.append(roleOption("admin", "Admin", normalizedSelected));
+        for (NavOption option : navOptions) {
+            options.append(roleOption(option.label, option.label, normalizedSelected));
+        }
+        return options.toString();
+    }
+
+    private static String roleOption(String value, String label, String selectedRole) {
+        return "<option value=\"" + escapeHtml(value) + "\"" +
+                (value.equalsIgnoreCase(selectedRole) ? " selected" : "") +
+                ">" + escapeHtml(label) + "</option>";
     }
 
     private static String sidebarLayoutStyles() {
@@ -698,8 +814,8 @@ public class App {
         return list;
     }
 
-    private static boolean updateUserDetails(String username, String firstName, String lastName, String email, boolean isAdmin) throws SQLException {
-        String role = isAdmin ? "admin" : "user";
+    private static boolean updateUserDetails(String username, String firstName, String lastName, String email, String role) throws SQLException {
+        boolean isAdmin = isAdminRole(role);
         String sql = "UPDATE users SET first_name = ?, last_name = ?, email = ?, is_admin = ?, role = ? WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -714,14 +830,14 @@ public class App {
         }
     }
 
-    private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUsername, String currentFirstName, String message, java.util.List<NavOption> navOptions) {
+    private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUserRole, String currentUsername, String currentFirstName, String message, java.util.List<NavOption> navOptions) {
         String selectedUsername = editData == null ? null : editData.get("username");
 
         StringBuilder tableRows = new StringBuilder();
         for (UserEntry u : users) {
             String fullName = escapeHtml(u.firstName) + " " + escapeHtml(u.lastName);
             String email = escapeHtml(u.email);
-            String roleSelected = u.isAdmin || "admin".equalsIgnoreCase(u.role) ? "admin" : "user";
+            String roleSelected = u.role != null && !u.role.isEmpty() ? u.role : (u.isAdmin ? "admin" : "user");
             boolean isSelected = u.username.equals(selectedUsername);
 
             String roleCell;
@@ -732,13 +848,12 @@ public class App {
                         "<input type=\"hidden\" name=\"lastName\" value=\"" + escapeHtml(u.lastName) + "\"/>" +
                         "<input type=\"hidden\" name=\"email\" value=\"" + escapeHtml(u.email) + "\"/>" +
                         "<select name=\"role\">" +
-                        "<option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option>" +
-                        "<option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option>" +
+                        buildRoleOptionsHtml(roleSelected, navOptions) +
                         "</select>" +
                         "<button type=\"submit\" class=\"btn-sm\">Save</button>" +
                         "</form>";
             } else {
-                roleCell = "<select disabled><option selected>" + ("admin".equals(roleSelected) ? "Admin" : "User") + "</option></select>";
+                roleCell = "<select disabled><option selected>" + escapeHtml(formatRoleDisplay(roleSelected)) + "</option></select>";
             }
 
             String actionsCell = currentIsAdmin
@@ -756,7 +871,10 @@ public class App {
         }
 
         String actionsHeader = currentIsAdmin ? "<th>Actions</th>" : "";
-        String userListHtml = "<div class=\"users-panel\"><table class=\"users-table\"><thead><tr>" +
+        String userListHtml = "<div class=\"user-search-bar\">" +
+                "<input type=\"search\" id=\"userSearch\" placeholder=\"Search by name or email...\" aria-label=\"Search users by name or email\"/>" +
+                "</div>" +
+                "<div class=\"users-panel\"><table class=\"users-table\"><thead><tr>" +
                 "<th>Name</th><th>Email</th><th>Role</th>" + actionsHeader +
                 "</tr></thead><tbody>" + tableRows + "</tbody></table></div>";
 
@@ -770,10 +888,10 @@ public class App {
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
             String em = escapeHtml(editData.getOrDefault("email", ""));
             String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
-            String displayRole = ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) ? "Admin" : "User";
+            String displayRole = formatRoleDisplay(roleVal);
             right = "<div class=\"read-only-details\"><h3 style=\"margin:0 0 1rem;\">" + fn + " " + ln + "</h3>" +
                     "<p><strong>Email:</strong> " + em + "</p>" +
-                    "<p><strong>Role:</strong> " + displayRole + "</p>" +
+                    "<p><strong>Role:</strong> " + escapeHtml(displayRole) + "</p>" +
                     "<p style=\"opacity:0.75;margin-top:1.5rem;\">You do not have permission to edit user profiles.</p></div>";
         } else {
             String uname = escapeHtml(editData.getOrDefault("username", ""));
@@ -781,13 +899,9 @@ public class App {
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
             String em = escapeHtml(editData.getOrDefault("email", ""));
             String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
-            String roleSelected = "user";
-            if ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) {
-                roleSelected = "admin";
-            }
+            String roleSelected = roleVal == null || roleVal.isEmpty() ? "user" : roleVal;
             String roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\">" +
-                    "<option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option>" +
-                    "<option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option></select>";
+                    buildRoleOptionsHtml(roleSelected, navOptions) + "</select>";
             String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</p>";
 
             right = "<form class=\"edit-form\" action=\"/users\" method=\"post\">" +
@@ -823,6 +937,9 @@ public class App {
                 ".main{flex:1;padding:2rem;}" +
                 ".users-layout{display:flex;gap:2rem;align-items:flex-start;}" +
                 ".users-list{flex:2;min-width:0;}" +
+                ".user-search-bar{margin-bottom:1rem;}" +
+                ".user-search-bar input{width:100%;padding:0.85rem 1rem;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-size:1rem;box-sizing:border-box;}" +
+                ".user-search-bar input::placeholder{color:rgba(248,250,252,0.65);}" +
                 ".users-detail{flex:1;min-width:280px;padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);}" +
                 ".users-panel{border-radius:16px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
                 ".users-table{width:100%;border-collapse:collapse;}" +
@@ -850,10 +967,19 @@ public class App {
                 "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
                 "a.button:hover{background:#1d4ed8;}" +
                 "</style></head><body>" +
-                "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentIsAdmin, navOptions, "user-item") + "<main class=\"main\">" +
+                "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentUserRole, navOptions, "user-item") + "<main class=\"main\">" +
                 headerHtml + feedback +
                 "<div class=\"users-layout\"><div class=\"users-list\">" + userListHtml + "</div><div class=\"users-detail\">" + right + "</div></div>" +
-                "</main></div></body></html>";
+                "</main></div>" +
+                "<script>" +
+                "document.getElementById('userSearch').addEventListener('input',function(e){" +
+                "const q=e.target.value.trim().toLowerCase();" +
+                "document.querySelectorAll('.users-table tbody tr').forEach(function(row){" +
+                "const name=(row.querySelector('.name-cell')?.textContent||'').toLowerCase();" +
+                "const email=(row.querySelector('.email-cell')?.textContent||'').toLowerCase();" +
+                "row.style.display=!q||name.includes(q)||email.includes(q)?'':'none';" +
+                "});});" +
+                "</script></body></html>";
     }
 
     // --- end users handlers ---
@@ -997,7 +1123,7 @@ public class App {
     }
 
     private static UserRecord findUserByUsername(String username) throws SQLException {
-        String sql = "SELECT first_name, is_admin, must_change_password FROM users WHERE username = ?";
+        String sql = "SELECT first_name, is_admin, must_change_password, role FROM users WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, username);
@@ -1005,17 +1131,20 @@ public class App {
                 if (!rs.next()) {
                     return null;
                 }
+                String role = rs.getString("role");
+                boolean isAdmin = rs.getInt("is_admin") == 1;
                 return new UserRecord(
                         rs.getString("first_name"),
-                        rs.getInt("is_admin") == 1,
-                        rs.getInt("must_change_password") == 1
+                        isAdmin,
+                        rs.getInt("must_change_password") == 1,
+                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user")
                 );
             }
         }
     }
 
     private static UserRecord findUserByCredentials(String username, String password) throws SQLException {
-        String sql = "SELECT first_name, is_admin, must_change_password FROM users WHERE username = ? AND password = ?";
+        String sql = "SELECT first_name, is_admin, must_change_password, role FROM users WHERE username = ? AND password = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, username);
@@ -1024,10 +1153,13 @@ public class App {
                 if (!rs.next()) {
                     return null;
                 }
+                String role = rs.getString("role");
+                boolean isAdmin = rs.getInt("is_admin") == 1;
                 return new UserRecord(
                         rs.getString("first_name"),
-                        rs.getInt("is_admin") == 1,
-                        rs.getInt("must_change_password") == 1
+                        isAdmin,
+                        rs.getInt("must_change_password") == 1,
+                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user")
                 );
             }
         }
@@ -1037,11 +1169,13 @@ public class App {
         final String firstName;
         final boolean isAdmin;
         final boolean mustChangePassword;
+        final String role;
 
-        UserRecord(String firstName, boolean isAdmin, boolean mustChangePassword) {
+        UserRecord(String firstName, boolean isAdmin, boolean mustChangePassword, String role) {
             this.firstName = firstName;
             this.isAdmin = isAdmin;
             this.mustChangePassword = mustChangePassword;
+            this.role = role;
         }
     }
 
@@ -1162,13 +1296,13 @@ public class App {
                 "<a href=\"/\">Return to home</a></main></body></html>";
     }
 
-    private static String buildDashboardPage(String firstName, String username, boolean isAdmin, java.util.List<NavOption> navOptions) {
+    private static String buildDashboardPage(String firstName, String username, String userRole, java.util.List<NavOption> navOptions) {
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Dashboard</title>" +
                 "<style>" + sidebarLayoutStyles() + " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;} .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);} </style></head><body>" +
-                "<div class=\"container\">" + buildSidebarHtml(username, isAdmin, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"container\">" + buildSidebarHtml(username, userRole, navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Welcome, " + escapeHtml(firstName) + "</h1>" +
                 "<p style=\"margin:0;opacity:0.9;\">Your username is " + escapeHtml(username) + ".</p>" +
@@ -1203,7 +1337,7 @@ public class App {
                 " button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
                 " button:hover{background:#1d4ed8;}" +
                 "</style></head><body>" +
-                "<div class=\"container\">" + buildSidebarHtml(username, true, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"container\">" + buildSidebarHtml(username, "admin", navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Admin Panel</h1>" +
                 "<p style=\"margin:0;opacity:0.9;\">Add a new option to the left navigation. It will appear as a link for all logged-in users.</p>" +
@@ -1218,7 +1352,7 @@ public class App {
                 "</div></div></main></div></body></html>";
     }
 
-    private static String buildCustomPage(String firstName, String username, boolean isAdmin, NavOption option, java.util.List<NavOption> navOptions) {
+    private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions) {
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
@@ -1227,7 +1361,7 @@ public class App {
                 " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
                 " .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
                 "</style></head><body>" +
-                "<div class=\"container\">" + buildSidebarHtml(username, isAdmin, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"container\">" + buildSidebarHtml(username, userRole, navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0;\">Welcome to " + escapeHtml(option.label) + "</h1></div>" +
                 "</main></div></body></html>";
