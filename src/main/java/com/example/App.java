@@ -572,12 +572,15 @@ public class App {
 
         String feedback = message == null ? "" : "<div style=\"padding:0.5rem 0;color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</div>";
 
-        // show welcome at top of right pane and, for admins, render an Add User button at top-right of the content area
+        // show welcome at top of right pane with Edit Profile / Logout (and Add User for admins) at top-right
         String headerHtml = "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;\">" +
                 "<div><h2 style=\"margin:0 0 0.25rem;\">Welcome, " + escapeHtml(currentFirstName) + "</h2><p style=\"margin:0;opacity:0.9;\">Signed in as " + escapeHtml(currentUsername) + "</p></div>" +
-                (currentIsAdmin ? "<div><a class=\"button\" href=\"/add-user\">" +
-                        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"vertical-align:middle;\"><path d=\"M12 5v14M5 12h14\"></path></svg> <span style=\"margin-left:0.45rem;vertical-align:middle;\">Add User</span></a></div>" : "") +
-                "</div>";
+                "<div style=\"display:flex;gap:0.75rem;align-items:center;\">" +
+                "<a class=\"button\" href=\"/profile\">Edit Profile</a>" +
+                "<a class=\"button\" href=\"/logout\">Logout</a>" +
+                (currentIsAdmin ? "<a class=\"button\" href=\"/add-user\">" +
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"vertical-align:middle;\"><path d=\"M12 5v14M5 12h14\"></path></svg> <span style=\"margin-left:0.45rem;vertical-align:middle;\">Add User</span></a>" : "") +
+                "</div></div>";
 
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Users</title><style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .user-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .placeholder{opacity:0.85;} .edit-form{max-width:560px;display:grid;gap:0.75rem;} label{font-size:0.95rem;opacity:0.9;} input, select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;} button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;} a{color:#cbd5e1;} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
@@ -897,12 +900,12 @@ public class App {
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Dashboard</title>" +
-                "<style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .nav-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .nav-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);} .actions{display:flex;gap:1rem;margin-top:1rem;} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
+                "<style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .nav-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .nav-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;} .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
                 "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"nav-item\" href=\"/users\">Users</a></nav><hr/>" +
                 "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside><main class=\"main\">" +
+                "<div class=\"top-actions\">" + adminLink + "<a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Welcome, " + escapeHtml(firstName) + "</h1>" +
-                "<p style=\"margin:0 0 1rem;opacity:0.9;\">Your username is " + escapeHtml(username) + ".</p>" +
-                "<div class=\"actions\">" + adminLink + "<a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<p style=\"margin:0;opacity:0.9;\">Your username is " + escapeHtml(username) + ".</p>" +
                 "</div></main></div></body></html>";
     }
 
