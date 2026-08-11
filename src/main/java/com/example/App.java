@@ -126,6 +126,17 @@ public class App {
     private static void initStatusDatabase() throws SQLException {
         try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              Statement statement = connection.createStatement()) {
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS work_item_defs (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "name TEXT NOT NULL UNIQUE, " +
+                    "sort_order INTEGER NOT NULL DEFAULT 0)"
+            );
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS status_defs (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "label TEXT NOT NULL UNIQUE, " +
+                    "percent_value INTEGER NOT NULL DEFAULT 0, " +
+                    "sort_order INTEGER NOT NULL DEFAULT 0)"
+            );
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_work_items (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
                     "nav_option_id INTEGER NOT NULL, " +
@@ -137,6 +148,23 @@ public class App {
             );
         }
         migrateWorkItemsFromUsersDbIfNeeded();
+        seedDefaultWorkItemAndStatusDefs();
+    }
+
+    private static void seedDefaultWorkItemAndStatusDefs() throws SQLException {
+        if (listWorkItemDefs().isEmpty()) {
+            String[] defaults = {"Fiber Laying", "PTA", "STA", "LAN Cabling", "Media Center"};
+            for (int i = 0; i < defaults.length; i++) {
+                insertWorkItemDef(defaults[i], i + 1);
+            }
+        }
+        if (listStatusDefs().isEmpty()) {
+            insertStatusDef("Not started", 0, 1);
+            insertStatusDef("In Progress", 25, 2);
+            insertStatusDef("50% Complete", 50, 3);
+            insertStatusDef("75% Complete", 75, 4);
+            insertStatusDef("Completed", 100, 5);
+        }
     }
 
     private static void migrateWorkItemsFromUsersDbIfNeeded() {
@@ -468,17 +496,22 @@ public class App {
 
             String query = exchange.getRequestURI().getQuery();
             Map<String, String> q = parseQueryString(query);
-            Integer editId = null;
-            String editParam = q.get("edit");
-            if (editParam != null && !editParam.isBlank()) {
-                try {
-                    editId = Integer.parseInt(editParam.trim());
-                } catch (NumberFormatException ignored) {
-                    editId = null;
-                }
-            }
+            Integer editId = parseNavOptionId(q.get("edit"));
+            Integer editWorkItemId = parseNavOptionId(q.get("editWorkItem"));
+            Integer editStatusId = parseNavOptionId(q.get("editStatus"));
 
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, adminUser.firstName, "", listNavOptions(), null, editId));
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(
+                    username,
+                    adminUser.firstName,
+                    "",
+                    listNavOptions(),
+                    listWorkItemDefs(),
+                    listStatusDefs(),
+                    null,
+                    editId,
+                    editWorkItemId,
+                    editStatusId
+            ));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the admin panel right now."));
         }
@@ -488,6 +521,17 @@ public class App {
         String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<String, String> formData = parseFormData(requestBody);
         String action = formData.getOrDefault("action", "add").trim().toLowerCase();
+
+        try {
+            if (action.startsWith("work-item-") || action.startsWith("status-")) {
+                handleAdminManagedDefsPost(exchange, username, firstName, action, formData);
+                return;
+            }
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update admin settings."));
+            return;
+        }
+
         String label = formData.getOrDefault("label", "").trim();
         String idParam = formData.getOrDefault("id", "").trim();
 
@@ -511,62 +555,202 @@ public class App {
 
         try {
             if (label.isEmpty()) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option.", null));
+                sendAdminPanel(exchange, username, firstName, label, "Please enter a name for the navigation option.", null, null, null, 400);
                 return;
             }
 
             saveNavOption(label);
-            navOptions = listNavOptions();
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + label + "\" added successfully.", null));
+            sendAdminPanel(exchange, username, firstName, "", "Navigation option \"" + label + "\" added successfully.", null, null, null, 200);
         } catch (SQLException ex) {
             String message = ex.getMessage();
             if (message != null && message.contains("UNIQUE")) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists.", null));
+                sendAdminPanel(exchange, username, firstName, label, "A navigation option with that name already exists.", null, null, null, 400);
             } else {
-                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to add the navigation option. Please try again later.", null));
+                sendAdminPanel(exchange, username, firstName, label, "Unable to add the navigation option. Please try again later.", null, null, null, 500);
             }
+        }
+    }
+
+    private static void handleAdminManagedDefsPost(HttpExchange exchange, String username, String firstName, String action, Map<String, String> form) throws IOException, SQLException {
+        String name = form.getOrDefault("name", "").trim();
+        String label = form.getOrDefault("label", "").trim();
+        String idParam = form.getOrDefault("id", "").trim();
+        String percentParam = form.getOrDefault("percent", "").trim();
+        Integer id = parseNavOptionId(idParam);
+
+        switch (action) {
+            case "work-item-add" -> {
+                if (name.isEmpty()) {
+                    sendAdminPanel(exchange, username, firstName, "", "Work item name is required.", null, null, null, 400);
+                    return;
+                }
+                try {
+                    insertWorkItemDef(name, nextWorkItemSortOrder());
+                    seedWorkItemToAllNavOptions(name);
+                    redirect(exchange, "/admin-panel");
+                } catch (SQLException ex) {
+                    sendAdminPanel(exchange, username, firstName, "", "Unable to add work item. It may already exist.", null, null, null, 400);
+                }
+            }
+            case "work-item-update" -> {
+                if (id == null || name.isEmpty()) {
+                    sendAdminPanel(exchange, username, firstName, "", "Invalid work item update.", null, id, null, 400);
+                    return;
+                }
+                WorkItemDef existing = findWorkItemDefById(id);
+                if (existing == null) {
+                    sendAdminPanel(exchange, username, firstName, "", "Work item not found.", null, null, null, 404);
+                    return;
+                }
+                try {
+                    updateWorkItemDef(id, name);
+                    if (!existing.name.equals(name)) {
+                        renameWorkItemAcrossOptions(existing.name, name);
+                    }
+                    redirect(exchange, "/admin-panel");
+                } catch (SQLException ex) {
+                    sendAdminPanel(exchange, username, firstName, "", "Unable to update work item. Name may already exist.", null, id, null, 400);
+                }
+            }
+            case "work-item-delete" -> {
+                if (id == null) {
+                    sendAdminPanel(exchange, username, firstName, "", "Invalid work item.", null, null, null, 400);
+                    return;
+                }
+                WorkItemDef existing = findWorkItemDefById(id);
+                if (existing == null) {
+                    redirect(exchange, "/admin-panel");
+                    return;
+                }
+                deleteWorkItemDef(id);
+                deleteWorkItemAcrossOptions(existing.name);
+                redirect(exchange, "/admin-panel");
+            }
+            case "status-add" -> {
+                if (label.isEmpty()) {
+                    sendAdminPanel(exchange, username, firstName, "", "Status label is required.", null, null, null, 400);
+                    return;
+                }
+                int percent = parsePercent(percentParam, 0);
+                try {
+                    insertStatusDef(label, percent, nextStatusSortOrder());
+                    redirect(exchange, "/admin-panel");
+                } catch (SQLException ex) {
+                    sendAdminPanel(exchange, username, firstName, "", "Unable to add status. It may already exist.", null, null, null, 400);
+                }
+            }
+            case "status-update" -> {
+                if (id == null || label.isEmpty()) {
+                    sendAdminPanel(exchange, username, firstName, "", "Invalid status update.", null, null, id, 400);
+                    return;
+                }
+                StatusDef existing = findStatusDefById(id);
+                if (existing == null) {
+                    sendAdminPanel(exchange, username, firstName, "", "Status not found.", null, null, null, 404);
+                    return;
+                }
+                int percent = parsePercent(percentParam, existing.percentValue);
+                try {
+                    updateStatusDef(id, label, percent);
+                    if (!existing.label.equals(label)) {
+                        renameStatusAcrossOptions(existing.label, label);
+                    }
+                    redirect(exchange, "/admin-panel");
+                } catch (SQLException ex) {
+                    sendAdminPanel(exchange, username, firstName, "", "Unable to update status. Label may already exist.", null, null, id, 400);
+                }
+            }
+            case "status-delete" -> {
+                if (id == null) {
+                    sendAdminPanel(exchange, username, firstName, "", "Invalid status.", null, null, null, 400);
+                    return;
+                }
+                java.util.List<StatusDef> statuses = listStatusDefs();
+                if (statuses.size() <= 1) {
+                    sendAdminPanel(exchange, username, firstName, "", "At least one status option is required.", null, null, null, 400);
+                    return;
+                }
+                StatusDef existing = findStatusDefById(id);
+                if (existing == null) {
+                    redirect(exchange, "/admin-panel");
+                    return;
+                }
+                StatusDef replacement = statuses.stream().filter(s -> s.id != existing.id).findFirst().orElse(null);
+                deleteStatusDef(id);
+                if (replacement != null) {
+                    renameStatusAcrossOptions(existing.label, replacement.label);
+                }
+                redirect(exchange, "/admin-panel");
+            }
+            default -> sendAdminPanel(exchange, username, firstName, "", "Unknown action.", null, null, null, 400);
+        }
+    }
+
+    private static int parsePercent(String value, int fallback) {
+        try {
+            int percent = Integer.parseInt(value);
+            return Math.max(0, Math.min(100, percent));
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
+    }
+
+    private static void sendAdminPanel(HttpExchange exchange, String username, String firstName, String labelValue, String message, Integer editId, Integer editWorkItemId, Integer editStatusId, int statusCode) throws IOException {
+        try {
+            sendHtmlResponse(exchange, statusCode, buildAdminPanelPage(
+                    username,
+                    firstName,
+                    labelValue,
+                    listNavOptions(),
+                    listWorkItemDefs(),
+                    listStatusDefs(),
+                    message,
+                    editId,
+                    editWorkItemId,
+                    editStatusId
+            ));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the admin panel right now."));
         }
     }
 
     private static void handleAdminPanelDelete(HttpExchange exchange, String username, String firstName, String idParam, java.util.List<NavOption> navOptions) throws IOException {
         Integer optionId = parseNavOptionId(idParam);
         if (optionId == null) {
-            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, "", navOptions, "Invalid navigation option.", null));
+            sendAdminPanel(exchange, username, firstName, "", "Invalid navigation option.", null, null, null, 400);
             return;
         }
 
-        NavOption option = null;
         try {
-            option = findNavOptionById(optionId);
+            NavOption option = findNavOptionById(optionId);
             if (option == null) {
-                sendHtmlResponse(exchange, 404, buildAdminPanelPage(username, firstName, "", listNavOptions(), "The navigation option was not found.", null));
+                sendAdminPanel(exchange, username, firstName, "", "The navigation option was not found.", null, null, null, 404);
                 return;
             }
             deleteNavOption(optionId);
             resetUsersRoleByLabel(option.label);
-            navOptions = listNavOptions();
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + option.label + "\" deleted.", null));
+            sendAdminPanel(exchange, username, firstName, "", "Navigation option \"" + option.label + "\" deleted.", null, null, null, 200);
         } catch (SQLException ex) {
-            sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, "", navOptions, "Unable to delete the navigation option. Please try again later.", null));
+            sendAdminPanel(exchange, username, firstName, "", "Unable to delete the navigation option. Please try again later.", null, null, null, 500);
         }
     }
 
     private static void handleAdminPanelUpdate(HttpExchange exchange, String username, String firstName, String idParam, String label, java.util.List<NavOption> navOptions) throws IOException {
         Integer optionId = parseNavOptionId(idParam);
         if (optionId == null) {
-            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Invalid navigation option.", optionId));
+            sendAdminPanel(exchange, username, firstName, label, "Invalid navigation option.", optionId, null, null, 400);
             return;
         }
 
         if (label.isEmpty()) {
-            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option.", optionId));
+            sendAdminPanel(exchange, username, firstName, label, "Please enter a name for the navigation option.", optionId, null, null, 400);
             return;
         }
 
         try {
             NavOption existing = findNavOptionById(optionId);
             if (existing == null) {
-                sendHtmlResponse(exchange, 404, buildAdminPanelPage(username, firstName, "", listNavOptions(), "The navigation option was not found.", null));
+                sendAdminPanel(exchange, username, firstName, "", "The navigation option was not found.", null, null, null, 404);
                 return;
             }
 
@@ -579,9 +763,9 @@ public class App {
         } catch (SQLException ex) {
             String message = ex.getMessage();
             if (message != null && message.contains("UNIQUE")) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists.", optionId));
+                sendAdminPanel(exchange, username, firstName, label, "A navigation option with that name already exists.", optionId, null, null, 400);
             } else {
-                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to update the navigation option. Please try again later.", optionId));
+                sendAdminPanel(exchange, username, firstName, label, "Unable to update the navigation option. Please try again later.", optionId, null, null, 500);
             }
         }
     }
@@ -636,21 +820,31 @@ public class App {
         }
     }
 
-    private static final String[] DEFAULT_WORK_ITEMS = {
-            "Fiber Laying",
-            "PTA",
-            "STA",
-            "LAN Cabling",
-            "Media Center"
-    };
+    private static class WorkItemDef {
+        final int id;
+        final String name;
+        final int sortOrder;
 
-    private static final String[] WORK_ITEM_STATUSES = {
-            "Not started",
-            "In Progress",
-            "50% Complete",
-            "75% Complete",
-            "Completed"
-    };
+        WorkItemDef(int id, String name, int sortOrder) {
+            this.id = id;
+            this.name = name;
+            this.sortOrder = sortOrder;
+        }
+    }
+
+    private static class StatusDef {
+        final int id;
+        final String label;
+        final int percentValue;
+        final int sortOrder;
+
+        StatusDef(int id, String label, int percentValue, int sortOrder) {
+            this.id = id;
+            this.label = label;
+            this.percentValue = percentValue;
+            this.sortOrder = sortOrder;
+        }
+    }
 
     private static void handleCustomPage(HttpExchange exchange) throws IOException {
         String username = getSessionUsername(exchange);
@@ -706,7 +900,8 @@ public class App {
             }
 
             java.util.List<WorkItem> workItems = listWorkItems(optionId);
-            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.role, option, navOptions, workItems));
+            java.util.List<StatusDef> statusDefs = listStatusDefs();
+            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.role, option, navOptions, workItems, statusDefs));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the page right now."));
         }
@@ -718,12 +913,11 @@ public class App {
         String itemName = form.getOrDefault("itemName", "").trim();
         String status = form.getOrDefault("status", "").trim();
 
-        if (itemName.isEmpty() || !isValidWorkItemName(itemName) || !isValidWorkItemStatus(status)) {
-            redirect(exchange, "/page?id=" + optionId);
-            return;
-        }
-
         try {
+            if (itemName.isEmpty() || !isValidWorkItemName(itemName) || !isValidWorkItemStatus(status)) {
+                redirect(exchange, "/page?id=" + optionId);
+                return;
+            }
             updateWorkItemStatus(optionId, itemName, status);
         } catch (SQLException ignored) {
             // fall through to redirect
@@ -731,18 +925,18 @@ public class App {
         redirect(exchange, "/page?id=" + optionId);
     }
 
-    private static boolean isValidWorkItemName(String itemName) {
-        for (String item : DEFAULT_WORK_ITEMS) {
-            if (item.equals(itemName)) {
+    private static boolean isValidWorkItemName(String itemName) throws SQLException {
+        for (WorkItemDef item : listWorkItemDefs()) {
+            if (item.name.equals(itemName)) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean isValidWorkItemStatus(String status) {
-        for (String value : WORK_ITEM_STATUSES) {
-            if (value.equals(status)) {
+    private static boolean isValidWorkItemStatus(String status) throws SQLException {
+        for (StatusDef def : listStatusDefs()) {
+            if (def.label.equals(status)) {
                 return true;
             }
         }
@@ -1106,21 +1300,50 @@ public class App {
     }
 
     private static void ensureDefaultWorkItems(NavOption option) throws SQLException {
+        java.util.List<WorkItemDef> defs = listWorkItemDefs();
+        String defaultStatus = getDefaultStatusLabel();
         String sql = "INSERT OR IGNORE INTO nav_work_items (nav_option_id, option_label, item_name, status, updated_at) VALUES (?, ?, ?, ?, ?)";
         try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             String now = Instant.now().toString();
-            for (String itemName : DEFAULT_WORK_ITEMS) {
+            for (WorkItemDef def : defs) {
                 stmt.setInt(1, option.id);
                 stmt.setString(2, option.label);
-                stmt.setString(3, itemName);
-                stmt.setString(4, "Not started");
+                stmt.setString(3, def.name);
+                stmt.setString(4, defaultStatus);
                 stmt.setString(5, now);
                 stmt.addBatch();
             }
             stmt.executeBatch();
         }
         syncWorkItemOptionLabel(option);
+        removeOrphanedWorkItems(option.id, defs);
+    }
+
+    private static void removeOrphanedWorkItems(int navOptionId, java.util.List<WorkItemDef> defs) throws SQLException {
+        StringBuilder placeholders = new StringBuilder();
+        for (int i = 0; i < defs.size(); i++) {
+            if (i > 0) {
+                placeholders.append(",");
+            }
+            placeholders.append("?");
+        }
+        String sql = defs.isEmpty()
+                ? "DELETE FROM nav_work_items WHERE nav_option_id = ?"
+                : "DELETE FROM nav_work_items WHERE nav_option_id = ? AND item_name NOT IN (" + placeholders + ")";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, navOptionId);
+            for (int i = 0; i < defs.size(); i++) {
+                stmt.setString(i + 2, defs.get(i).name);
+            }
+            stmt.executeUpdate();
+        }
+    }
+
+    private static String getDefaultStatusLabel() throws SQLException {
+        java.util.List<StatusDef> statuses = listStatusDefs();
+        return statuses.isEmpty() ? "Not started" : statuses.get(0).label;
     }
 
     private static void syncWorkItemOptionLabel(NavOption option) throws SQLException {
@@ -1134,33 +1357,27 @@ public class App {
     }
 
     private static java.util.List<WorkItem> listWorkItems(int navOptionId) throws SQLException {
-        String sql = "SELECT item_name, status FROM nav_work_items WHERE nav_option_id = ? ORDER BY id ASC";
-        var list = new java.util.ArrayList<WorkItem>();
+        ensureDefaultWorkItems(navOptionId);
+        String sql = "SELECT item_name, status FROM nav_work_items WHERE nav_option_id = ?";
+        var byName = new LinkedHashMap<String, WorkItem>();
         try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setInt(1, navOptionId);
             try (var rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    list.add(new WorkItem(rs.getString("item_name"), rs.getString("status")));
+                    byName.put(rs.getString("item_name"), new WorkItem(rs.getString("item_name"), rs.getString("status")));
                 }
             }
-        }
-
-        if (list.isEmpty()) {
-            ensureDefaultWorkItems(navOptionId);
-            return listWorkItems(navOptionId);
         }
 
         var ordered = new java.util.ArrayList<WorkItem>();
-        for (String expected : DEFAULT_WORK_ITEMS) {
-            for (WorkItem item : list) {
-                if (expected.equals(item.name)) {
-                    ordered.add(item);
-                    break;
-                }
+        for (WorkItemDef def : listWorkItemDefs()) {
+            WorkItem item = byName.get(def.name);
+            if (item != null) {
+                ordered.add(item);
             }
         }
-        return ordered.isEmpty() ? list : ordered;
+        return ordered;
     }
 
     private static void updateWorkItemStatus(int navOptionId, String itemName, String status) throws SQLException {
@@ -1179,13 +1396,195 @@ public class App {
         if (status == null) {
             return 0;
         }
-        return switch (status) {
-            case "In Progress" -> 25;
-            case "50% Complete" -> 50;
-            case "75% Complete" -> 75;
-            case "Completed" -> 100;
-            default -> 0;
-        };
+        try {
+            for (StatusDef def : listStatusDefs()) {
+                if (def.label.equals(status)) {
+                    return def.percentValue;
+                }
+            }
+        } catch (SQLException ignored) {
+            // fall through
+        }
+        return 0;
+    }
+
+    private static java.util.List<WorkItemDef> listWorkItemDefs() throws SQLException {
+        String sql = "SELECT id, name, sort_order FROM work_item_defs ORDER BY sort_order ASC, id ASC";
+        var list = new java.util.ArrayList<WorkItemDef>();
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql);
+             var rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                list.add(new WorkItemDef(rs.getInt("id"), rs.getString("name"), rs.getInt("sort_order")));
+            }
+        }
+        return list;
+    }
+
+    private static java.util.List<StatusDef> listStatusDefs() throws SQLException {
+        String sql = "SELECT id, label, percent_value, sort_order FROM status_defs ORDER BY sort_order ASC, id ASC";
+        var list = new java.util.ArrayList<StatusDef>();
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql);
+             var rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                list.add(new StatusDef(rs.getInt("id"), rs.getString("label"), rs.getInt("percent_value"), rs.getInt("sort_order")));
+            }
+        }
+        return list;
+    }
+
+    private static WorkItemDef findWorkItemDefById(int id) throws SQLException {
+        String sql = "SELECT id, name, sort_order FROM work_item_defs WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            try (var rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new WorkItemDef(rs.getInt("id"), rs.getString("name"), rs.getInt("sort_order"));
+            }
+        }
+    }
+
+    private static StatusDef findStatusDefById(int id) throws SQLException {
+        String sql = "SELECT id, label, percent_value, sort_order FROM status_defs WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            try (var rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new StatusDef(rs.getInt("id"), rs.getString("label"), rs.getInt("percent_value"), rs.getInt("sort_order"));
+            }
+        }
+    }
+
+    private static int nextWorkItemSortOrder() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             Statement stmt = connection.createStatement();
+             var rs = stmt.executeQuery("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM work_item_defs")) {
+            return rs.next() ? rs.getInt(1) : 1;
+        }
+    }
+
+    private static int nextStatusSortOrder() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             Statement stmt = connection.createStatement();
+             var rs = stmt.executeQuery("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM status_defs")) {
+            return rs.next() ? rs.getInt(1) : 1;
+        }
+    }
+
+    private static void insertWorkItemDef(String name, int sortOrder) throws SQLException {
+        String sql = "INSERT INTO work_item_defs (name, sort_order) VALUES (?, ?)";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, name);
+            stmt.setInt(2, sortOrder);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void updateWorkItemDef(int id, String name) throws SQLException {
+        String sql = "UPDATE work_item_defs SET name = ? WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, name);
+            stmt.setInt(2, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void deleteWorkItemDef(int id) throws SQLException {
+        String sql = "DELETE FROM work_item_defs WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void insertStatusDef(String label, int percent, int sortOrder) throws SQLException {
+        String sql = "INSERT INTO status_defs (label, percent_value, sort_order) VALUES (?, ?, ?)";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
+            stmt.setInt(2, percent);
+            stmt.setInt(3, sortOrder);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void updateStatusDef(int id, String label, int percent) throws SQLException {
+        String sql = "UPDATE status_defs SET label = ?, percent_value = ? WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
+            stmt.setInt(2, percent);
+            stmt.setInt(3, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void deleteStatusDef(int id) throws SQLException {
+        String sql = "DELETE FROM status_defs WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void seedWorkItemToAllNavOptions(String itemName) throws SQLException {
+        String defaultStatus = getDefaultStatusLabel();
+        String sql = "INSERT OR IGNORE INTO nav_work_items (nav_option_id, option_label, item_name, status, updated_at) VALUES (?, ?, ?, ?, ?)";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            String now = Instant.now().toString();
+            for (NavOption option : listNavOptions()) {
+                stmt.setInt(1, option.id);
+                stmt.setString(2, option.label);
+                stmt.setString(3, itemName);
+                stmt.setString(4, defaultStatus);
+                stmt.setString(5, now);
+                stmt.addBatch();
+            }
+            stmt.executeBatch();
+        }
+    }
+
+    private static void renameWorkItemAcrossOptions(String oldName, String newName) throws SQLException {
+        String sql = "UPDATE nav_work_items SET item_name = ?, updated_at = ? WHERE item_name = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, newName);
+            stmt.setString(2, Instant.now().toString());
+            stmt.setString(3, oldName);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void deleteWorkItemAcrossOptions(String itemName) throws SQLException {
+        String sql = "DELETE FROM nav_work_items WHERE item_name = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, itemName);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void renameStatusAcrossOptions(String oldLabel, String newLabel) throws SQLException {
+        String sql = "UPDATE nav_work_items SET status = ?, updated_at = ? WHERE status = ?";
+        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, newLabel);
+            stmt.setString(2, Instant.now().toString());
+            stmt.setString(3, oldLabel);
+            stmt.executeUpdate();
+        }
     }
 
     private static int calculateOverallProgress(java.util.List<WorkItem> workItems) {
@@ -2026,7 +2425,18 @@ public class App {
                 "</div></main></div></body></html>";
     }
 
-    private static String buildAdminPanelPage(String username, String firstName, String labelValue, java.util.List<NavOption> navOptions, String message, Integer editId) {
+    private static String buildAdminPanelPage(
+            String username,
+            String firstName,
+            String labelValue,
+            java.util.List<NavOption> navOptions,
+            java.util.List<WorkItemDef> workItemDefs,
+            java.util.List<StatusDef> statusDefs,
+            String message,
+            Integer editId,
+            Integer editWorkItemId,
+            Integer editStatusId
+    ) {
         String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;margin-top:1rem;font-weight:600;\">" + escapeHtml(message) + "</p>";
         StringBuilder existingOptions = new StringBuilder();
         if (navOptions.isEmpty()) {
@@ -2059,13 +2469,73 @@ public class App {
             existingOptions.append("</ul>");
         }
 
+        StringBuilder workItemsHtml = new StringBuilder();
+        workItemsHtml.append("<ul class=\"nav-option-list\">");
+        for (WorkItemDef item : workItemDefs) {
+            if (editWorkItemId != null && editWorkItemId == item.id) {
+                workItemsHtml.append("<li class=\"nav-option-item\">")
+                        .append("<form class=\"nav-option-edit-form\" action=\"/admin-panel\" method=\"post\">")
+                        .append("<input type=\"hidden\" name=\"action\" value=\"work-item-update\"/>")
+                        .append("<input type=\"hidden\" name=\"id\" value=\"").append(item.id).append("\"/>")
+                        .append("<input name=\"name\" type=\"text\" value=\"").append(escapeHtml(item.name)).append("\" required/>")
+                        .append("<button type=\"submit\" class=\"btn-sm\">Save</button>")
+                        .append("<a class=\"btn-link\" href=\"/admin-panel\">Cancel</a>")
+                        .append("</form></li>");
+            } else {
+                workItemsHtml.append("<li class=\"nav-option-item\">")
+                        .append("<span class=\"nav-option-label\">").append(escapeHtml(item.name)).append("</span>")
+                        .append("<span class=\"nav-option-actions\">")
+                        .append("<a class=\"button btn-sm\" href=\"/admin-panel?editWorkItem=").append(item.id).append("\">Edit</a>")
+                        .append("<form class=\"nav-option-delete-form\" action=\"/admin-panel\" method=\"post\">")
+                        .append("<input type=\"hidden\" name=\"action\" value=\"work-item-delete\"/>")
+                        .append("<input type=\"hidden\" name=\"id\" value=\"").append(item.id).append("\"/>")
+                        .append("<button type=\"submit\" class=\"btn-sm btn-danger\">Delete</button>")
+                        .append("</form></span></li>");
+            }
+        }
+        if (workItemDefs.isEmpty()) {
+            workItemsHtml.append("<li class=\"nav-option-item\"><span style=\"opacity:0.85;\">No work items yet.</span></li>");
+        }
+        workItemsHtml.append("</ul>");
+
+        StringBuilder statusHtml = new StringBuilder();
+        statusHtml.append("<ul class=\"nav-option-list\">");
+        for (StatusDef status : statusDefs) {
+            if (editStatusId != null && editStatusId == status.id) {
+                statusHtml.append("<li class=\"nav-option-item\">")
+                        .append("<form class=\"nav-option-edit-form status-edit-form\" action=\"/admin-panel\" method=\"post\">")
+                        .append("<input type=\"hidden\" name=\"action\" value=\"status-update\"/>")
+                        .append("<input type=\"hidden\" name=\"id\" value=\"").append(status.id).append("\"/>")
+                        .append("<input name=\"label\" type=\"text\" value=\"").append(escapeHtml(status.label)).append("\" required/>")
+                        .append("<input name=\"percent\" type=\"number\" min=\"0\" max=\"100\" value=\"").append(status.percentValue).append("\" required/>")
+                        .append("<button type=\"submit\" class=\"btn-sm\">Save</button>")
+                        .append("<a class=\"btn-link\" href=\"/admin-panel\">Cancel</a>")
+                        .append("</form></li>");
+            } else {
+                statusHtml.append("<li class=\"nav-option-item\">")
+                        .append("<span class=\"nav-option-label\">").append(escapeHtml(status.label))
+                        .append(" <span class=\"meta\">(").append(status.percentValue).append("%)</span></span>")
+                        .append("<span class=\"nav-option-actions\">")
+                        .append("<a class=\"button btn-sm\" href=\"/admin-panel?editStatus=").append(status.id).append("\">Edit</a>")
+                        .append("<form class=\"nav-option-delete-form\" action=\"/admin-panel\" method=\"post\">")
+                        .append("<input type=\"hidden\" name=\"action\" value=\"status-delete\"/>")
+                        .append("<input type=\"hidden\" name=\"id\" value=\"").append(status.id).append("\"/>")
+                        .append("<button type=\"submit\" class=\"btn-sm btn-danger\">Delete</button>")
+                        .append("</form></span></li>");
+            }
+        }
+        if (statusDefs.isEmpty()) {
+            statusHtml.append("<li class=\"nav-option-item\"><span style=\"opacity:0.85;\">No status options yet.</span></li>");
+        }
+        statusHtml.append("</ul>");
+
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Admin Panel</title>" +
                 "<style>" + sidebarLayoutStyles() +
                 " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
-                " .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
+                " .card{max-width:920px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);margin-bottom:1.25rem;}" +
                 " form{display:grid;gap:1rem;margin-top:1rem;}" +
                 " label{font-size:0.95rem;opacity:0.9;}" +
                 " input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
@@ -2075,9 +2545,13 @@ public class App {
                 " .nav-option-item{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:0.75rem 0;border-bottom:1px solid rgba(255,255,255,0.08);}" +
                 " .nav-option-item:last-child{border-bottom:none;}" +
                 " .nav-option-label{font-weight:600;}" +
+                " .nav-option-label .meta{opacity:0.75;font-weight:500;font-size:0.9rem;}" +
                 " .nav-option-actions{display:flex;gap:0.5rem;align-items:center;}" +
                 " .nav-option-edit-form,.nav-option-delete-form{display:flex;gap:0.5rem;align-items:center;margin:0;}" +
                 " .nav-option-edit-form input{flex:1;min-width:0;}" +
+                " .status-edit-form input[type=number]{max-width:110px;}" +
+                " .inline-form{display:flex;gap:0.75rem;align-items:center;margin-top:1rem;}" +
+                " .inline-form input{flex:1;}" +
                 " .btn-sm{padding:0.45rem 0.75rem;font-size:0.85rem;}" +
                 " .btn-danger{background:#dc2626;}" +
                 " .btn-danger:hover{background:#b91c1c;}" +
@@ -2086,9 +2560,9 @@ public class App {
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(username, "admin", navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                feedback +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Admin Panel</h1>" +
                 "<p style=\"margin:0;opacity:0.9;\">Add a new option to the left navigation. It will appear as a link for all logged-in users.</p>" +
-                feedback +
                 "<form action=\"/admin-panel\" method=\"post\">" +
                 "<input type=\"hidden\" name=\"action\" value=\"add\"/>" +
                 "<label for=\"label\">Navigation Option Name</label>" +
@@ -2097,7 +2571,25 @@ public class App {
                 "</form>" +
                 "<div style=\"margin-top:2rem;\"><h2 style=\"margin:0 0 0.75rem;font-size:1.1rem;\">Current Navigation Options</h2>" +
                 existingOptions +
-                "</div></div></main></div></body></html>";
+                "</div></div>" +
+                "<div class=\"card\"><h2 style=\"margin:0 0 0.5rem;\">Work Items</h2>" +
+                "<p style=\"margin:0;opacity:0.9;\">These items appear on every option page. Add, rename, or remove them here.</p>" +
+                "<form class=\"inline-form\" action=\"/admin-panel\" method=\"post\">" +
+                "<input type=\"hidden\" name=\"action\" value=\"work-item-add\"/>" +
+                "<input name=\"name\" type=\"text\" placeholder=\"New work item name\" required/>" +
+                "<button type=\"submit\">Add Work Item</button>" +
+                "</form>" +
+                "<div style=\"margin-top:1.25rem;\">" + workItemsHtml + "</div></div>" +
+                "<div class=\"card\"><h2 style=\"margin:0 0 0.5rem;\">Status Options</h2>" +
+                "<p style=\"margin:0;opacity:0.9;\">These values appear in the status dropdown. Percent is used for overall progress.</p>" +
+                "<form class=\"inline-form\" action=\"/admin-panel\" method=\"post\">" +
+                "<input type=\"hidden\" name=\"action\" value=\"status-add\"/>" +
+                "<input name=\"label\" type=\"text\" placeholder=\"New status label\" required/>" +
+                "<input name=\"percent\" type=\"number\" min=\"0\" max=\"100\" value=\"0\" required/>" +
+                "<button type=\"submit\">Add Status</button>" +
+                "</form>" +
+                "<div style=\"margin-top:1.25rem;\">" + statusHtml + "</div></div>" +
+                "</main></div></body></html>";
     }
 
     private static String buildStatusPage(String username, String firstName, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList, OptionProgress selected) {
@@ -2172,7 +2664,7 @@ public class App {
                 "</div></main></div></body></html>";
     }
 
-    private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions, java.util.List<WorkItem> workItems) {
+    private static String buildCustomPage(String firstName, String username, String userRole, NavOption option, java.util.List<NavOption> navOptions, java.util.List<WorkItem> workItems, java.util.List<StatusDef> statusDefs) {
         StringBuilder itemsHtml = new StringBuilder();
         itemsHtml.append("<div class=\"work-items\"><table class=\"work-table\"><thead><tr><th>Work Item</th><th>Status</th></tr></thead><tbody>");
         for (WorkItem item : workItems) {
@@ -2182,10 +2674,10 @@ public class App {
                     .append("<form class=\"status-form\" action=\"/page?id=").append(option.id).append("\" method=\"post\">")
                     .append("<input type=\"hidden\" name=\"itemName\" value=\"").append(escapeHtml(item.name)).append("\"/>")
                     .append("<select name=\"status\" onchange=\"this.form.submit()\">");
-            for (String status : WORK_ITEM_STATUSES) {
-                itemsHtml.append("<option value=\"").append(escapeHtml(status)).append("\"")
-                        .append(status.equals(item.status) ? " selected" : "")
-                        .append(">").append(escapeHtml(status)).append("</option>");
+            for (StatusDef status : statusDefs) {
+                itemsHtml.append("<option value=\"").append(escapeHtml(status.label)).append("\"")
+                        .append(status.label.equals(item.status) ? " selected" : "")
+                        .append(">").append(escapeHtml(status.label)).append("</option>");
             }
             itemsHtml.append("</select></form></td></tr>");
         }
@@ -2210,7 +2702,7 @@ public class App {
                 "<div class=\"container\">" + buildSidebarHtml(username, userRole, navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.25rem;\">Welcome to " + escapeHtml(option.label) + "</h1>" +
-                "<p style=\"margin:0;opacity:0.85;\">Track progress for the fixed work items below.</p>" +
+                "<p style=\"margin:0;opacity:0.85;\">Track progress for the work items below.</p>" +
                 itemsHtml +
                 "</div></main></div></body></html>";
     }
