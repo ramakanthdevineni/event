@@ -389,6 +389,7 @@ public class App {
                         editData.put("email", u.email);
                         editData.put("username", u.username);
                         editData.put("isAdmin", u.isAdmin ? "1" : "0");
+                        editData.put("role", u.isAdmin || "admin".equalsIgnoreCase(u.role) ? "admin" : "user");
                         break;
                     }
                 }
@@ -513,66 +514,95 @@ public class App {
     }
 
     private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUsername, String currentFirstName, String message) {
-        StringBuilder left = new StringBuilder();
+        String selectedUsername = editData == null ? null : editData.get("username");
+
+        StringBuilder tableRows = new StringBuilder();
         for (UserEntry u : users) {
-            left.append("<div style=\\\"display:flex;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.5rem;\\\">");
-            left.append("<a class=\\\"user-item\\\" href=\\\"/users?edit=").append(java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8)).append("\\\">")
-                    .append("<div><strong>").append(escapeHtml(u.firstName)).append(" ").append(escapeHtml(u.lastName)).append("</strong><br><small>").append(escapeHtml(u.username)).append("</small>")
-                    .append(u.isAdmin ? " <span style=\\\"color:#fde68a;font-weight:600;\\\">(Admin)</span>" : "")
-                    .append("</div></a>");
-            // edit button (visible to admins)
+            String fullName = escapeHtml(u.firstName) + " " + escapeHtml(u.lastName);
+            String email = escapeHtml(u.email);
+            String roleSelected = u.isAdmin || "admin".equalsIgnoreCase(u.role) ? "admin" : "user";
+            boolean isSelected = u.username.equals(selectedUsername);
+
+            String roleCell;
             if (currentIsAdmin) {
-                left.append("<div><a class=\\\"button\\\" href=\\\"/users?edit=").append(java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8)).append("\\\">Edit</a></div>");
+                roleCell = "<form class=\"role-form\" action=\"/users\" method=\"post\">" +
+                        "<input type=\"hidden\" name=\"username\" value=\"" + escapeHtml(u.username) + "\"/>" +
+                        "<input type=\"hidden\" name=\"firstName\" value=\"" + escapeHtml(u.firstName) + "\"/>" +
+                        "<input type=\"hidden\" name=\"lastName\" value=\"" + escapeHtml(u.lastName) + "\"/>" +
+                        "<input type=\"hidden\" name=\"email\" value=\"" + escapeHtml(u.email) + "\"/>" +
+                        "<select name=\"role\">" +
+                        "<option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option>" +
+                        "<option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option>" +
+                        "</select>" +
+                        "<button type=\"submit\" class=\"btn-sm\">Save</button>" +
+                        "</form>";
+            } else {
+                roleCell = "<select disabled><option selected>" + ("admin".equals(roleSelected) ? "Admin" : "User") + "</option></select>";
             }
-            left.append("</div>");
+
+            String actionsCell = currentIsAdmin
+                    ? "<a class=\"button btn-sm\" href=\"/users?edit=" + java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8) + "\">Edit</a>"
+                    : "";
+
+            tableRows.append("<tr").append(isSelected ? " class=\"selected\"" : "").append(">")
+                    .append("<td class=\"name-cell\">").append(fullName).append("</td>")
+                    .append("<td class=\"email-cell\">").append(email).append("</td>")
+                    .append("<td class=\"role-cell\">").append(roleCell).append("</td>");
+            if (currentIsAdmin) {
+                tableRows.append("<td class=\"actions-cell\">").append(actionsCell).append("</td>");
+            }
+            tableRows.append("</tr>");
         }
+
+        String actionsHeader = currentIsAdmin ? "<th>Actions</th>" : "";
+        String userListHtml = "<div class=\"users-panel\"><table class=\"users-table\"><thead><tr>" +
+                "<th>Name</th><th>Email</th><th>Role</th>" + actionsHeader +
+                "</tr></thead><tbody>" + tableRows + "</tbody></table></div>";
 
         String right;
         if (editData == null) {
-            // when no user is selected, show Add User option on the right for admins
-            if (currentIsAdmin) {
-                // Add User button moved to the top-right of the users pane; show placeholder without the button here
-                right = "<div class=\"placeholder\"><p style=\"margin-bottom:1rem;\">No user selected.</p></div>";
-            } else {
-                right = "<div class=\"placeholder\">Select a user from the left to view details.</div>";
-            }
+            right = "<div class=\"placeholder\"><p>No user selected.</p>" +
+                    (currentIsAdmin ? "<p style=\"opacity:0.75;font-size:0.9rem;\">Select Edit on a user to update their profile.</p>" : "") +
+                    "</div>";
+        } else if (!currentIsAdmin) {
+            String fn = escapeHtml(editData.getOrDefault("firstName", ""));
+            String ln = escapeHtml(editData.getOrDefault("lastName", ""));
+            String em = escapeHtml(editData.getOrDefault("email", ""));
+            String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
+            String displayRole = ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) ? "Admin" : "User";
+            right = "<div class=\"read-only-details\"><h3 style=\"margin:0 0 1rem;\">" + fn + " " + ln + "</h3>" +
+                    "<p><strong>Email:</strong> " + em + "</p>" +
+                    "<p><strong>Role:</strong> " + displayRole + "</p>" +
+                    "<p style=\"opacity:0.75;margin-top:1.5rem;\">You do not have permission to edit user profiles.</p></div>";
         } else {
             String uname = escapeHtml(editData.getOrDefault("username", ""));
             String fn = escapeHtml(editData.getOrDefault("firstName", ""));
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
             String em = escapeHtml(editData.getOrDefault("email", ""));
-            // role may be under isAdmin or role
             String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
-
-            String roleControl;
-            if (currentIsAdmin) {
-                // roleVal may be '1' or '0' from earlier code; convert to admin/user
-                String roleSelected = "user";
-                if ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) roleSelected = "admin";
-                roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\"><option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option><option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option></select>";
-            } else {
-                String displayRole = ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) ? "Admin" : "User";
-                roleControl = "<p><strong>Role:</strong> " + displayRole + "</p>";
+            String roleSelected = "user";
+            if ("1".equals(roleVal) || "admin".equalsIgnoreCase(roleVal)) {
+                roleSelected = "admin";
             }
+            String roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\">" +
+                    "<option value=\"user\"" + ("user".equals(roleSelected) ? " selected" : "") + ">User</option>" +
+                    "<option value=\"admin\"" + ("admin".equals(roleSelected) ? " selected" : "") + ">Admin</option></select>";
+            String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</p>";
 
-            String disabled = currentIsAdmin ? "" : "disabled";
-
-            String feedback = message == null ? "" : "<p style=\\\"color:#a5f3fc;font-weight:600;\\\">" + escapeHtml(message) + "</p>";
-
-            right = "<form class=\\\"edit-form\\\" action=\\\"/users\\\" method=\\\"post\\\">" +
-                    "<input type=\\\"hidden\\\" name=\\\"username\\\" value=\\\"" + uname + "\\\" />" +
-                    "<label for=\\\"firstName\\\">First Name</label><input id=\\\"firstName\\\" name=\\\"firstName\\\" type=\\\"text\\\" value=\\\"" + fn + "\\\" required " + disabled + "/>" +
-                    "<label for=\\\"lastName\\\">Last Name</label><input id=\\\"lastName\\\" name=\\\"lastName\\\" type=\\\"text\\\" value=\\\"" + ln + "\\\" required " + disabled + "/>" +
-                    "<label for=\\\"email\\\">Email</label><input id=\\\"email\\\" name=\\\"email\\\" type=\\\"email\\\" value=\\\"" + em + "\\\" required " + disabled + "/>" +
+            right = "<form class=\"edit-form\" action=\"/users\" method=\"post\">" +
+                    "<h3 style=\"margin:0 0 1rem;\">Edit User</h3>" +
+                    "<input type=\"hidden\" name=\"username\" value=\"" + uname + "\"/>" +
+                    "<label for=\"firstName\">First Name</label><input id=\"firstName\" name=\"firstName\" type=\"text\" value=\"" + fn + "\" required/>" +
+                    "<label for=\"lastName\">Last Name</label><input id=\"lastName\" name=\"lastName\" type=\"text\" value=\"" + ln + "\" required/>" +
+                    "<label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\" value=\"" + em + "\" required/>" +
                     roleControl +
-                    "<div style=\\\"margin-top:1rem;\\\">" + (currentIsAdmin ? "<button type=\\\"submit\\\">Save Changes</button>" : "") + "<a href=\\\"/dashboard\\\" style=\\\"margin-left:0.75rem;color:#cbd5e1;text-decoration:none;\\\">Back</a></div>" +
+                    "<div class=\"form-actions\"><button type=\"submit\">Save Changes</button><a href=\"/users\">Cancel</a></div>" +
                     feedback +
                     "</form>";
         }
 
-        String feedback = message == null ? "" : "<div style=\"padding:0.5rem 0;color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</div>";
+        String feedback = message == null ? "" : "<div class=\"page-feedback\">" + escapeHtml(message) + "</div>";
 
-        // show welcome at top of right pane with Edit Profile / Logout (and Add User for admins) at top-right
         String headerHtml = "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;\">" +
                 "<div><h2 style=\"margin:0 0 0.25rem;\">Welcome, " + escapeHtml(currentFirstName) + "</h2><p style=\"margin:0;opacity:0.9;\">Signed in as " + escapeHtml(currentUsername) + "</p></div>" +
                 "<div style=\"display:flex;gap:0.75rem;align-items:center;\">" +
@@ -583,8 +613,44 @@ public class App {
                 "</div></div>";
 
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
-                "<title>Users</title><style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .user-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .placeholder{opacity:0.85;} .edit-form{max-width:560px;display:grid;gap:0.75rem;} label{font-size:0.95rem;opacity:0.9;} input, select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;} button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;} a{color:#cbd5e1;} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
-                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"user-item\" href=\"/dashboard\">Dashboard</a><a class=\"user-item\" href=\"/users\">Users</a></nav><hr/> <p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(currentUsername) + "</p></aside><main class=\"main\">" + headerHtml + feedback + "<div style=\"display:flex;gap:2rem;align-items:flex-start;\"><div style=\"width:300px;\">" + left.toString() + "</div><div style=\"flex:1;\">" + right + "</div></div></main></div></body></html>";
+                "<title>Users</title><style>" +
+                "body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
+                ".container{display:flex;min-height:100vh;}" +
+                ".sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);}" +
+                ".user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;}" +
+                ".user-item:hover{background:rgba(255,255,255,0.03);}" +
+                ".main{flex:1;padding:2rem;}" +
+                ".users-layout{display:flex;gap:2rem;align-items:flex-start;}" +
+                ".users-list{flex:2;min-width:0;}" +
+                ".users-detail{flex:1;min-width:280px;padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);}" +
+                ".users-panel{border-radius:16px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
+                ".users-table{width:100%;border-collapse:collapse;}" +
+                ".users-table th,.users-table td{padding:0.9rem 1rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
+                ".users-table th{font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;font-weight:600;}" +
+                ".users-table tbody tr:hover{background:rgba(255,255,255,0.03);}" +
+                ".users-table tr.selected{background:rgba(255,255,255,0.08);}" +
+                ".name-cell{font-weight:600;}" +
+                ".email-cell{opacity:0.9;font-size:0.95rem;}" +
+                ".role-form{display:flex;gap:0.5rem;align-items:center;margin:0;}" +
+                ".placeholder{opacity:0.85;}" +
+                ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
+                ".edit-form{display:grid;gap:0.75rem;}" +
+                ".form-actions{display:flex;gap:0.75rem;align-items:center;margin-top:0.5rem;}" +
+                "label{font-size:0.95rem;opacity:0.9;}" +
+                "input,select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
+                "select:disabled{opacity:0.85;cursor:not-allowed;}" +
+                "button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
+                "button:hover{background:#1d4ed8;}" +
+                ".btn-sm{padding:0.45rem 0.75rem;font-size:0.85rem;}" +
+                "a{color:#cbd5e1;text-decoration:none;}" +
+                "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
+                "a.button:hover{background:#1d4ed8;}" +
+                "</style></head><body>" +
+                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"user-item\" href=\"/dashboard\">Dashboard</a><a class=\"user-item\" href=\"/users\">Users</a></nav><hr/>" +
+                "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(currentUsername) + "</p></aside><main class=\"main\">" +
+                headerHtml + feedback +
+                "<div class=\"users-layout\"><div class=\"users-list\">" + userListHtml + "</div><div class=\"users-detail\">" + right + "</div></div>" +
+                "</main></div></body></html>";
     }
 
     // --- end users handlers ---
