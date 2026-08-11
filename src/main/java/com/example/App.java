@@ -1642,13 +1642,16 @@ public class App {
     }
 
     private static java.util.List<WorkItemDef> listWorkItemDefs() throws SQLException {
+        long now = System.currentTimeMillis();
         java.util.List<WorkItemDef> cached = workItemDefsCache;
-        if (cached != null) {
+        if (cached != null && (now - workItemDefsCacheAtMs) < DEFS_CACHE_TTL_MS) {
             return cached;
         }
         synchronized (STATUS_DEFS_CACHE_LOCK) {
-            if (workItemDefsCache != null) {
-                return workItemDefsCache;
+            cached = workItemDefsCache;
+            now = System.currentTimeMillis();
+            if (cached != null && (now - workItemDefsCacheAtMs) < DEFS_CACHE_TTL_MS) {
+                return cached;
             }
             String sql = "SELECT id, name, sort_order FROM work_item_defs ORDER BY sort_order ASC, id ASC";
             var list = new java.util.ArrayList<WorkItemDef>();
@@ -1660,18 +1663,22 @@ public class App {
                 }
             }
             workItemDefsCache = java.util.List.copyOf(list);
+            workItemDefsCacheAtMs = now;
             return workItemDefsCache;
         }
     }
 
     private static java.util.List<StatusDef> listStatusDefs() throws SQLException {
+        long now = System.currentTimeMillis();
         java.util.List<StatusDef> cached = statusDefsCache;
-        if (cached != null) {
+        if (cached != null && (now - statusDefsCacheAtMs) < DEFS_CACHE_TTL_MS) {
             return cached;
         }
         synchronized (STATUS_DEFS_CACHE_LOCK) {
-            if (statusDefsCache != null) {
-                return statusDefsCache;
+            cached = statusDefsCache;
+            now = System.currentTimeMillis();
+            if (cached != null && (now - statusDefsCacheAtMs) < DEFS_CACHE_TTL_MS) {
+                return cached;
             }
             String sql = "SELECT id, label, percent_value, sort_order FROM status_defs ORDER BY sort_order ASC, id ASC";
             var list = new java.util.ArrayList<StatusDef>();
@@ -1683,6 +1690,7 @@ public class App {
                 }
             }
             statusDefsCache = java.util.List.copyOf(list);
+            statusDefsCacheAtMs = now;
             return statusDefsCache;
         }
     }
@@ -1876,7 +1884,11 @@ public class App {
 
     private static final Object STATUS_DEFS_CACHE_LOCK = new Object();
     private static volatile java.util.List<StatusDef> statusDefsCache;
+    private static volatile long statusDefsCacheAtMs;
     private static volatile java.util.List<WorkItemDef> workItemDefsCache;
+    private static volatile long workItemDefsCacheAtMs;
+    // Short TTL so admin/core/status/mapview processes pick up shared DB changes without restart.
+    private static final long DEFS_CACHE_TTL_MS = 1_000L;
 
     private static void invalidateProgressCache() {
         synchronized (PROGRESS_CACHE_LOCK) {
@@ -1888,7 +1900,9 @@ public class App {
     private static void invalidateDefsCache() {
         synchronized (STATUS_DEFS_CACHE_LOCK) {
             statusDefsCache = null;
+            statusDefsCacheAtMs = 0L;
             workItemDefsCache = null;
+            workItemDefsCacheAtMs = 0L;
         }
         invalidateProgressCache();
     }
