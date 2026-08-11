@@ -103,6 +103,7 @@ public class App {
     private static void ensureUserTableColumns(Connection connection) throws SQLException {
         addColumnIfMissing(connection, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0");
         addColumnIfMissing(connection, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0");
+        addColumnIfMissing(connection, "users", "is_enabled", "INTEGER NOT NULL DEFAULT 1");
     }
 
     private static void addRoleColumnIfMissing(Connection connection) throws SQLException {
@@ -201,6 +202,8 @@ public class App {
             UserRecord user = findUserByCredentials(username, password);
             if (user == null) {
                 sendHtmlResponse(exchange, 401, buildErrorPage("Invalid username or password. Please try again."));
+            } else if (!user.enabled) {
+                sendHtmlResponse(exchange, 403, buildErrorPage("This account has been disabled. Please contact an administrator."));
             } else {
                 String sessionId = createSession(username);
                 exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=" + sessionId + "; Path=/; HttpOnly");
@@ -601,6 +604,7 @@ public class App {
                 }
             }
             String editUsername = q.get("edit");
+            String notice = q.get("notice");
 
             var users = listAllUsers();
             Map<String, String> editData = null;
@@ -619,7 +623,7 @@ public class App {
                 }
             }
 
-            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, current.role, currentUsername, current.firstName, null, listNavOptions()));
+            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, current.role, currentUsername, current.firstName, notice, listNavOptions()));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load users right now."));
         }
@@ -634,21 +638,43 @@ public class App {
 
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<String, String> form = parseFormData(body);
+        String action = form.getOrDefault("action", "update").trim().toLowerCase();
         String username = form.getOrDefault("username", "").trim();
+        String currentUser = getSessionUsername(exchange);
+
+        if (username.isEmpty()) {
+            sendHtmlResponse(exchange, 400, buildErrorPage("Invalid user request."));
+            return;
+        }
+
+        if ("delete".equals(action)) {
+            handleDeleteUserPost(exchange, username, currentUser);
+            return;
+        }
+
+        if ("toggle-enabled".equals(action)) {
+            handleToggleUserEnabledPost(exchange, username, currentUser);
+            return;
+        }
+
+        if ("update-role".equals(action)) {
+            handleUpdateUserRolePost(exchange, form, username, currentUser);
+            return;
+        }
+
         String firstName = form.getOrDefault("firstName", "").trim();
         String lastName = form.getOrDefault("lastName", "").trim();
         String email = form.getOrDefault("email", "").trim();
         String role = form.getOrDefault("role", "user").trim();
 
-        if (username.isEmpty() || firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+        if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
             try {
                 var users = listAllUsers();
                 var navOptions = listNavOptions();
-                String curUser = getSessionUsername(exchange);
                 String curFirst = "";
                 String curRole = "user";
                 try {
-                    UserRecord cur = findUserByUsername(curUser);
+                    UserRecord cur = findUserByUsername(currentUser);
                     if (cur != null) {
                         curFirst = cur.firstName;
                         curRole = cur.role;
@@ -656,7 +682,7 @@ public class App {
                 } catch (SQLException e) {
                     curFirst = "";
                 }
-                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curRole, curUser, curFirst, "All fields are required.", navOptions));
+                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curRole, currentUser, curFirst, "All fields are required.", navOptions));
             } catch (SQLException ex) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user."));
             }
@@ -667,23 +693,19 @@ public class App {
             var navOptions = listNavOptions();
             if (!isValidRole(role, navOptions)) {
                 var users = listAllUsers();
-                String curUser = getSessionUsername(exchange);
-                UserRecord cur = findUserByUsername(curUser);
-                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", "Invalid role selected.", navOptions));
+                UserRecord cur = findUserByUsername(currentUser);
+                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", currentUser, cur != null ? cur.firstName : "", "Invalid role selected.", navOptions));
                 return;
             }
 
             boolean updated = updateUserDetails(username, firstName, lastName, email, role);
             if (updated) {
-                // Redirect on success to avoid confusing 400/200 behavior
                 redirect(exchange, "/users?edit=" + java.net.URLEncoder.encode(username, StandardCharsets.UTF_8));
                 return;
             } else {
-                // No rows updated — show error to user
                 var users = listAllUsers();
-                String curUser = getSessionUsername(exchange);
-                UserRecord cur = findUserByUsername(curUser);
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", "No changes were applied.", navOptions));
+                UserRecord cur = findUserByUsername(currentUser);
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", currentUser, cur != null ? cur.firstName : "", "No changes were applied.", navOptions));
                 return;
             }
         } catch (SQLException ex) {
@@ -692,13 +714,91 @@ public class App {
                 var users = listAllUsers();
                 var navOptions = listNavOptions();
                 String feedback = (msg != null && msg.contains("UNIQUE")) ? "Email already in use." : "Unable to save changes.";
-                String curUser = getSessionUsername(exchange);
-                UserRecord cur = findUserByUsername(curUser);
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", curUser, cur != null ? cur.firstName : "", feedback, navOptions));
+                UserRecord cur = findUserByUsername(currentUser);
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, cur != null ? cur.role : "admin", currentUser, cur != null ? cur.firstName : "", feedback, navOptions));
             } catch (SQLException inner) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to save changes."));
             }
         }
+    }
+
+    private static void handleDeleteUserPost(HttpExchange exchange, String username, String currentUser) throws IOException {
+        if (username.equals(currentUser)) {
+            redirectUsersNotice(exchange, "You cannot delete your own account.");
+            return;
+        }
+        if (DEFAULT_ADMIN_USERNAME.equals(username)) {
+            redirectUsersNotice(exchange, "The default admin account cannot be deleted.");
+            return;
+        }
+
+        try {
+            UserEntry target = findUserEntryByUsername(username);
+            if (target == null) {
+                redirectUsersNotice(exchange, "User not found.");
+                return;
+            }
+            deleteUser(username);
+            sessions.entrySet().removeIf(entry -> entry.getValue().equals(username));
+            redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" deleted.");
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to delete the user."));
+        }
+    }
+
+    private static void handleToggleUserEnabledPost(HttpExchange exchange, String username, String currentUser) throws IOException {
+        if (username.equals(currentUser)) {
+            redirectUsersNotice(exchange, "You cannot disable your own account.");
+            return;
+        }
+        if (DEFAULT_ADMIN_USERNAME.equals(username)) {
+            redirectUsersNotice(exchange, "The default admin account cannot be disabled.");
+            return;
+        }
+
+        try {
+            UserEntry target = findUserEntryByUsername(username);
+            if (target == null) {
+                redirectUsersNotice(exchange, "User not found.");
+                return;
+            }
+            boolean newEnabled = !target.enabled;
+            setUserEnabled(username, newEnabled);
+            if (!newEnabled) {
+                sessions.entrySet().removeIf(entry -> entry.getValue().equals(username));
+            }
+            String statusLabel = newEnabled ? "enabled" : "disabled";
+            redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" " + statusLabel + ".");
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user status."));
+        }
+    }
+
+    private static void handleUpdateUserRolePost(HttpExchange exchange, Map<String, String> form, String username, String currentUser) throws IOException {
+        String role = form.getOrDefault("role", "user").trim();
+
+        try {
+            var navOptions = listNavOptions();
+            if (!isValidRole(role, navOptions)) {
+                redirectUsersNotice(exchange, "Invalid role selected.");
+                return;
+            }
+
+            UserEntry target = findUserEntryByUsername(username);
+            if (target == null) {
+                redirectUsersNotice(exchange, "User not found.");
+                return;
+            }
+
+            updateUserRole(username, role);
+            redirectUsersNotice(exchange, "Role updated for \"" + target.firstName + " " + target.lastName + "\".");
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user role."));
+        }
+    }
+
+    private static void redirectUsersNotice(HttpExchange exchange, String notice) throws IOException {
+        redirect(exchange, "/users?notice=" + java.net.URLEncoder.encode(notice, StandardCharsets.UTF_8));
     }
 
     private static class NavOption {
@@ -914,19 +1014,21 @@ public class App {
         final String email;
         final boolean isAdmin;
         final String role;
+        final boolean enabled;
 
-        UserEntry(String username, String firstName, String lastName, String email, boolean isAdmin, String role) {
+        UserEntry(String username, String firstName, String lastName, String email, boolean isAdmin, String role, boolean enabled) {
             this.username = username;
             this.firstName = firstName;
             this.lastName = lastName;
             this.email = email;
             this.isAdmin = isAdmin;
             this.role = role == null ? "user" : role;
+            this.enabled = enabled;
         }
     }
 
     private static java.util.List<UserEntry> listAllUsers() throws SQLException {
-        String sql = "SELECT username, first_name, last_name, email, is_admin, role FROM users ORDER BY created_at DESC";
+        String sql = "SELECT username, first_name, last_name, email, is_admin, role, is_enabled FROM users ORDER BY created_at DESC";
         var list = new java.util.ArrayList<UserEntry>();
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql);
@@ -938,11 +1040,65 @@ public class App {
                         rs.getString("last_name"),
                         rs.getString("email"),
                         rs.getInt("is_admin") == 1,
-                        rs.getString("role")
+                        rs.getString("role"),
+                        rs.getInt("is_enabled") == 1
                 ));
             }
         }
         return list;
+    }
+
+    private static UserEntry findUserEntryByUsername(String username) throws SQLException {
+        String sql = "SELECT username, first_name, last_name, email, is_admin, role, is_enabled FROM users WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, username);
+            try (var rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new UserEntry(
+                        rs.getString("username"),
+                        rs.getString("first_name"),
+                        rs.getString("last_name"),
+                        rs.getString("email"),
+                        rs.getInt("is_admin") == 1,
+                        rs.getString("role"),
+                        rs.getInt("is_enabled") == 1
+                );
+            }
+        }
+    }
+
+    private static boolean updateUserRole(String username, String role) throws SQLException {
+        boolean isAdmin = isAdminRole(role);
+        String sql = "UPDATE users SET is_admin = ?, role = ? WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, isAdmin ? 1 : 0);
+            stmt.setString(2, role);
+            stmt.setString(3, username);
+            return stmt.executeUpdate() > 0;
+        }
+    }
+
+    private static void setUserEnabled(String username, boolean enabled) throws SQLException {
+        String sql = "UPDATE users SET is_enabled = ? WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, enabled ? 1 : 0);
+            stmt.setString(2, username);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void deleteUser(String username) throws SQLException {
+        String sql = "DELETE FROM users WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, username);
+            stmt.executeUpdate();
+        }
     }
 
     private static boolean updateUserDetails(String username, String firstName, String lastName, String email, String role) throws SQLException {
@@ -974,10 +1130,8 @@ public class App {
             String roleCell;
             if (currentIsAdmin) {
                 roleCell = "<form class=\"role-form\" action=\"/users\" method=\"post\">" +
+                        "<input type=\"hidden\" name=\"action\" value=\"update-role\"/>" +
                         "<input type=\"hidden\" name=\"username\" value=\"" + escapeHtml(u.username) + "\"/>" +
-                        "<input type=\"hidden\" name=\"firstName\" value=\"" + escapeHtml(u.firstName) + "\"/>" +
-                        "<input type=\"hidden\" name=\"lastName\" value=\"" + escapeHtml(u.lastName) + "\"/>" +
-                        "<input type=\"hidden\" name=\"email\" value=\"" + escapeHtml(u.email) + "\"/>" +
                         "<select name=\"role\">" +
                         buildRoleOptionsHtml(roleSelected, navOptions) +
                         "</select>" +
@@ -987,26 +1141,60 @@ public class App {
                 roleCell = "<select disabled><option selected>" + escapeHtml(formatRoleDisplay(roleSelected)) + "</option></select>";
             }
 
-            String actionsCell = currentIsAdmin
-                    ? "<a class=\"button btn-sm\" href=\"/users?edit=" + java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8) + "\">Edit</a>"
-                    : "";
+            String statusCell = u.enabled
+                    ? "<span class=\"status-badge status-active\">Active</span>"
+                    : "<span class=\"status-badge status-disabled\">Disabled</span>";
 
-            tableRows.append("<tr").append(isSelected ? " class=\"selected\"" : "").append(">")
+            String actionsCell = "";
+            if (currentIsAdmin) {
+                boolean isSelf = u.username.equals(currentUsername);
+                boolean isDefaultAdmin = DEFAULT_ADMIN_USERNAME.equals(u.username);
+                StringBuilder actions = new StringBuilder("<div class=\"user-actions\">");
+                actions.append("<a class=\"button btn-sm\" href=\"/users?edit=")
+                        .append(java.net.URLEncoder.encode(u.username, StandardCharsets.UTF_8)).append("\">Edit</a>");
+
+                if (!isSelf && !isDefaultAdmin) {
+                    String toggleLabel = u.enabled ? "Disable" : "Enable";
+                    actions.append("<form class=\"user-action-form\" action=\"/users\" method=\"post\">")
+                            .append("<input type=\"hidden\" name=\"action\" value=\"toggle-enabled\"/>")
+                            .append("<input type=\"hidden\" name=\"username\" value=\"").append(escapeHtml(u.username)).append("\"/>")
+                            .append("<button type=\"submit\" class=\"btn-sm btn-secondary\">").append(toggleLabel).append("</button>")
+                            .append("</form>")
+                            .append("<form class=\"user-action-form\" action=\"/users\" method=\"post\">")
+                            .append("<input type=\"hidden\" name=\"action\" value=\"delete\"/>")
+                            .append("<input type=\"hidden\" name=\"username\" value=\"").append(escapeHtml(u.username)).append("\"/>")
+                            .append("<button type=\"submit\" class=\"btn-sm btn-danger\">Delete</button>")
+                            .append("</form>");
+                }
+                actions.append("</div>");
+                actionsCell = actions.toString();
+            }
+
+            String rowClass = isSelected ? "selected" : "";
+            if (!u.enabled) {
+                rowClass = (rowClass.isEmpty() ? "" : rowClass + " ") + "user-disabled";
+            }
+
+            tableRows.append("<tr").append(rowClass.isEmpty() ? "" : " class=\"" + rowClass + "\"").append(">")
                     .append("<td class=\"name-cell\">").append(fullName).append("</td>")
-                    .append("<td class=\"email-cell\">").append(email).append("</td>")
-                    .append("<td class=\"role-cell\">").append(roleCell).append("</td>");
+                    .append("<td class=\"email-cell\">").append(email).append("</td>");
+            if (currentIsAdmin) {
+                tableRows.append("<td class=\"status-cell\">").append(statusCell).append("</td>");
+            }
+            tableRows.append("<td class=\"role-cell\">").append(roleCell).append("</td>");
             if (currentIsAdmin) {
                 tableRows.append("<td class=\"actions-cell\">").append(actionsCell).append("</td>");
             }
             tableRows.append("</tr>");
         }
 
+        String statusHeader = currentIsAdmin ? "<th>Status</th>" : "";
         String actionsHeader = currentIsAdmin ? "<th>Actions</th>" : "";
         String userListHtml = "<div class=\"user-search-bar\">" +
                 "<input type=\"search\" id=\"userSearch\" placeholder=\"Search by name or email...\" aria-label=\"Search users by name or email\"/>" +
                 "</div>" +
                 "<div class=\"users-panel\"><table class=\"users-table\"><thead><tr>" +
-                "<th>Name</th><th>Email</th><th>Role</th>" + actionsHeader +
+                "<th>Name</th><th>Email</th>" + statusHeader + "<th>Role</th>" + actionsHeader +
                 "</tr></thead><tbody>" + tableRows + "</tbody></table></div>";
 
         String right;
@@ -1037,6 +1225,7 @@ public class App {
 
             right = "<form class=\"edit-form\" action=\"/users\" method=\"post\">" +
                     "<h3 style=\"margin:0 0 1rem;\">Edit User</h3>" +
+                    "<input type=\"hidden\" name=\"action\" value=\"update\"/>" +
                     "<input type=\"hidden\" name=\"username\" value=\"" + uname + "\"/>" +
                     "<label for=\"firstName\">First Name</label><input id=\"firstName\" name=\"firstName\" type=\"text\" value=\"" + fn + "\" required/>" +
                     "<label for=\"lastName\">Last Name</label><input id=\"lastName\" name=\"lastName\" type=\"text\" value=\"" + ln + "\" required/>" +
@@ -1069,34 +1258,45 @@ public class App {
                 ".users-layout{display:flex;gap:2rem;align-items:flex-start;}" +
                 ".users-list{flex:2;min-width:0;}" +
                 ".user-search-bar{margin-bottom:1rem;}" +
-                ".user-search-bar input{width:100%;padding:0.85rem 1rem;border-radius:12px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-size:1rem;box-sizing:border-box;}" +
+                ".user-search-bar input{width:100%;padding:0.65rem 0.85rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-size:0.85rem;box-sizing:border-box;}" +
                 ".user-search-bar input::placeholder{color:rgba(248,250,252,0.65);}" +
                 ".users-detail{flex:1;min-width:280px;padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);}" +
                 ".users-panel{border-radius:16px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
-                ".users-table{width:100%;border-collapse:collapse;}" +
-                ".users-table th,.users-table td{padding:0.9rem 1rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
-                ".users-table th{font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;font-weight:600;}" +
+                ".users-table{width:100%;border-collapse:collapse;font-size:0.82rem;}" +
+                ".users-table th,.users-table td{padding:0.55rem 0.7rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
+                ".users-table th{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;font-weight:600;}" +
                 ".users-table tbody tr:hover{background:rgba(255,255,255,0.03);}" +
                 ".users-table tr.selected{background:rgba(255,255,255,0.08);}" +
-                ".name-cell{font-weight:600;}" +
-                ".email-cell{opacity:0.9;font-size:0.95rem;}" +
-                ".role-form{display:flex;gap:0.5rem;align-items:center;margin:0;}" +
+                ".users-table tr.user-disabled{opacity:0.65;}" +
+                ".name-cell{font-weight:600;font-size:0.82rem;}" +
+                ".email-cell{opacity:0.9;font-size:0.78rem;}" +
+                ".status-badge{display:inline-block;padding:0.2rem 0.55rem;border-radius:999px;font-size:0.72rem;font-weight:600;}" +
+                ".status-active{background:rgba(34,197,94,0.2);color:#86efac;}" +
+                ".status-disabled{background:rgba(239,68,68,0.2);color:#fca5a5;}" +
+                ".role-form{display:flex;gap:0.35rem;align-items:center;margin:0;}" +
+                ".role-form select{font-size:0.78rem;padding:0.35rem 1.5rem 0.35rem 0.55rem;}" +
+                ".user-actions{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;}" +
+                ".user-action-form{display:inline;margin:0;}" +
                 ".placeholder{opacity:0.85;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
                 ".edit-form{display:grid;gap:0.75rem;}" +
                 ".form-actions{display:flex;gap:0.75rem;align-items:center;margin-top:0.5rem;}" +
                 "label{font-size:0.95rem;opacity:0.9;}" +
                 "input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
-                "select{padding:0.55rem 2rem 0.55rem 0.75rem;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:#1e293b;color:#f8fafc;font-size:0.95rem;cursor:pointer;appearance:auto;}" +
+                "select{padding:0.55rem 2rem 0.55rem 0.75rem;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:#1e293b;color:#f8fafc;font-size:0.82rem;cursor:pointer;appearance:auto;}" +
                 "select option{background:#fff;color:#0f172a;}" +
                 "select option:checked,select option:hover{background:#2563eb;color:#fff;}" +
                 "select:disabled{opacity:0.85;cursor:not-allowed;background:rgba(255,255,255,0.08);}" +
-                "button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
+                "button{padding:0.55rem 0.8rem;border-radius:8px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
                 "button:hover{background:#1d4ed8;}" +
-                ".btn-sm{padding:0.45rem 0.75rem;font-size:0.85rem;}" +
+                ".btn-sm{padding:0.3rem 0.55rem;font-size:0.72rem;}" +
+                ".btn-secondary{background:#475569;}" +
+                ".btn-secondary:hover{background:#334155;}" +
+                ".btn-danger{background:#dc2626;}" +
+                ".btn-danger:hover{background:#b91c1c;}" +
                 "a{color:#cbd5e1;text-decoration:none;}" +
-                "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
-                "a.button:hover{background:#1d4ed8;}" +
+                ".users-table a.button{padding:0.3rem 0.55rem;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;font-size:0.72rem;}" +
+                ".users-table a.button:hover{background:#1d4ed8;}" +
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentUserRole, navOptions, "user-item") + "<main class=\"main\">" +
                 headerHtml + feedback +
@@ -1254,7 +1454,7 @@ public class App {
     }
 
     private static UserRecord findUserByUsername(String username) throws SQLException {
-        String sql = "SELECT first_name, is_admin, must_change_password, role FROM users WHERE username = ?";
+        String sql = "SELECT first_name, is_admin, must_change_password, role, is_enabled FROM users WHERE username = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, username);
@@ -1268,14 +1468,15 @@ public class App {
                         rs.getString("first_name"),
                         isAdmin,
                         rs.getInt("must_change_password") == 1,
-                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user")
+                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user"),
+                        rs.getInt("is_enabled") == 1
                 );
             }
         }
     }
 
     private static UserRecord findUserByCredentials(String username, String password) throws SQLException {
-        String sql = "SELECT first_name, is_admin, must_change_password, role FROM users WHERE username = ? AND password = ?";
+        String sql = "SELECT first_name, is_admin, must_change_password, role, is_enabled FROM users WHERE username = ? AND password = ?";
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, username);
@@ -1290,7 +1491,8 @@ public class App {
                         rs.getString("first_name"),
                         isAdmin,
                         rs.getInt("must_change_password") == 1,
-                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user")
+                        role != null && !role.isEmpty() ? role : (isAdmin ? "admin" : "user"),
+                        rs.getInt("is_enabled") == 1
                 );
             }
         }
@@ -1301,12 +1503,14 @@ public class App {
         final boolean isAdmin;
         final boolean mustChangePassword;
         final String role;
+        final boolean enabled;
 
-        UserRecord(String firstName, boolean isAdmin, boolean mustChangePassword, String role) {
+        UserRecord(String firstName, boolean isAdmin, boolean mustChangePassword, String role, boolean enabled) {
             this.firstName = firstName;
             this.isAdmin = isAdmin;
             this.mustChangePassword = mustChangePassword;
             this.role = role;
+            this.enabled = enabled;
         }
     }
 
