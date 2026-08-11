@@ -191,7 +191,7 @@ public class App {
     }
 
     private static void initStatusDatabase() throws SQLException {
-        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+        try (Connection connection = openStatusDb();
              Statement statement = connection.createStatement()) {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS work_item_defs (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
@@ -213,6 +213,7 @@ public class App {
                     "updated_at TEXT NOT NULL, " +
                     "UNIQUE(nav_option_id, item_name))"
             );
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_nav_work_items_option ON nav_work_items(nav_option_id)");
         }
         migrateWorkItemsFromUsersDbIfNeeded();
         seedDefaultWorkItemAndStatusDefs();
@@ -983,6 +984,13 @@ public class App {
         document.add(overviewTable);
         document.add(new Paragraph(" "));
 
+        Map<String, Integer> percentByStatus;
+        try {
+            percentByStatus = statusPercentMap();
+        } catch (SQLException ex) {
+            percentByStatus = Map.of();
+        }
+
         for (OptionProgress progress : progressList) {
             document.add(new Paragraph(progress.option.label + " — Overall progress: " + progress.overallPercent + "%", headingFont));
             document.add(new Paragraph(" "));
@@ -995,7 +1003,7 @@ public class App {
             detailTable.addCell(pdfHeaderCell("Progress", tableHeaderFont));
 
             for (WorkItem item : progress.workItems) {
-                int pct = statusToPercent(item.status);
+                int pct = statusToPercent(item.status, percentByStatus);
                 detailTable.addCell(pdfBodyCell(item.name, normalFont));
                 detailTable.addCell(pdfBodyCell(item.status, normalFont));
                 detailTable.addCell(pdfBodyCell(pct + "%", normalFont));
@@ -1429,6 +1437,7 @@ public class App {
         if (created != null) {
             ensureDefaultWorkItems(created.id);
         }
+        invalidateProgressCache();
     }
 
     private static NavOption findNavOptionByLabelExact(String label) throws SQLException {
@@ -1454,6 +1463,7 @@ public class App {
             stmt.executeUpdate();
         }
         syncWorkItemOptionLabel(new NavOption(id, label));
+        invalidateProgressCache();
     }
 
     private static void deleteNavOption(int id) throws SQLException {
@@ -1467,6 +1477,7 @@ public class App {
             deleteOption.setInt(1, id);
             deleteOption.executeUpdate();
         }
+        invalidateProgressCache();
     }
 
     private static class WorkItem {
@@ -1563,9 +1574,13 @@ public class App {
 
     private static java.util.List<WorkItem> listWorkItems(int navOptionId) throws SQLException {
         ensureDefaultWorkItems(navOptionId);
+        return listWorkItemsReadOnly(navOptionId, listWorkItemDefs());
+    }
+
+    private static java.util.List<WorkItem> listWorkItemsReadOnly(int navOptionId, java.util.List<WorkItemDef> defs) throws SQLException {
         String sql = "SELECT item_name, status FROM nav_work_items WHERE nav_option_id = ?";
         var byName = new LinkedHashMap<String, WorkItem>();
-        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+        try (Connection connection = openStatusDb();
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setInt(1, navOptionId);
             try (var rs = stmt.executeQuery()) {
@@ -1576,7 +1591,7 @@ public class App {
         }
 
         var ordered = new java.util.ArrayList<WorkItem>();
-        for (WorkItemDef def : listWorkItemDefs()) {
+        for (WorkItemDef def : defs) {
             WorkItem item = byName.get(def.name);
             if (item != null) {
                 ordered.add(item);
@@ -1595,6 +1610,15 @@ public class App {
             stmt.setString(4, itemName);
             stmt.executeUpdate();
         }
+        invalidateProgressCache();
+    }
+
+    private static Map<String, Integer> statusPercentMap() throws SQLException {
+        Map<String, Integer> map = new LinkedHashMap<>();
+        for (StatusDef def : listStatusDefs()) {
+            map.put(def.label, def.percentValue);
+        }
+        return map;
     }
 
     private static int statusToPercent(String status) {
@@ -1602,41 +1626,65 @@ public class App {
             return 0;
         }
         try {
-            for (StatusDef def : listStatusDefs()) {
-                if (def.label.equals(status)) {
-                    return def.percentValue;
-                }
-            }
+            Integer pct = statusPercentMap().get(status);
+            return pct != null ? pct : 0;
         } catch (SQLException ignored) {
-            // fall through
+            return 0;
         }
-        return 0;
+    }
+
+    private static int statusToPercent(String status, Map<String, Integer> percentByStatus) {
+        if (status == null || percentByStatus == null) {
+            return 0;
+        }
+        Integer pct = percentByStatus.get(status);
+        return pct != null ? pct : 0;
     }
 
     private static java.util.List<WorkItemDef> listWorkItemDefs() throws SQLException {
-        String sql = "SELECT id, name, sort_order FROM work_item_defs ORDER BY sort_order ASC, id ASC";
-        var list = new java.util.ArrayList<WorkItemDef>();
-        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
-             PreparedStatement stmt = connection.prepareStatement(sql);
-             var rs = stmt.executeQuery()) {
-            while (rs.next()) {
-                list.add(new WorkItemDef(rs.getInt("id"), rs.getString("name"), rs.getInt("sort_order")));
-            }
+        java.util.List<WorkItemDef> cached = workItemDefsCache;
+        if (cached != null) {
+            return cached;
         }
-        return list;
+        synchronized (STATUS_DEFS_CACHE_LOCK) {
+            if (workItemDefsCache != null) {
+                return workItemDefsCache;
+            }
+            String sql = "SELECT id, name, sort_order FROM work_item_defs ORDER BY sort_order ASC, id ASC";
+            var list = new java.util.ArrayList<WorkItemDef>();
+            try (Connection connection = openStatusDb();
+                 PreparedStatement stmt = connection.prepareStatement(sql);
+                 var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new WorkItemDef(rs.getInt("id"), rs.getString("name"), rs.getInt("sort_order")));
+                }
+            }
+            workItemDefsCache = java.util.List.copyOf(list);
+            return workItemDefsCache;
+        }
     }
 
     private static java.util.List<StatusDef> listStatusDefs() throws SQLException {
-        String sql = "SELECT id, label, percent_value, sort_order FROM status_defs ORDER BY sort_order ASC, id ASC";
-        var list = new java.util.ArrayList<StatusDef>();
-        try (Connection connection = DriverManager.getConnection(STATUS_DB_URL);
-             PreparedStatement stmt = connection.prepareStatement(sql);
-             var rs = stmt.executeQuery()) {
-            while (rs.next()) {
-                list.add(new StatusDef(rs.getInt("id"), rs.getString("label"), rs.getInt("percent_value"), rs.getInt("sort_order")));
-            }
+        java.util.List<StatusDef> cached = statusDefsCache;
+        if (cached != null) {
+            return cached;
         }
-        return list;
+        synchronized (STATUS_DEFS_CACHE_LOCK) {
+            if (statusDefsCache != null) {
+                return statusDefsCache;
+            }
+            String sql = "SELECT id, label, percent_value, sort_order FROM status_defs ORDER BY sort_order ASC, id ASC";
+            var list = new java.util.ArrayList<StatusDef>();
+            try (Connection connection = openStatusDb();
+                 PreparedStatement stmt = connection.prepareStatement(sql);
+                 var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new StatusDef(rs.getInt("id"), rs.getString("label"), rs.getInt("percent_value"), rs.getInt("sort_order")));
+                }
+            }
+            statusDefsCache = java.util.List.copyOf(list);
+            return statusDefsCache;
+        }
     }
 
     private static WorkItemDef findWorkItemDefById(int id) throws SQLException {
@@ -1691,6 +1739,7 @@ public class App {
             stmt.setInt(2, sortOrder);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void updateWorkItemDef(int id, String name) throws SQLException {
@@ -1701,6 +1750,7 @@ public class App {
             stmt.setInt(2, id);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void deleteWorkItemDef(int id) throws SQLException {
@@ -1710,6 +1760,7 @@ public class App {
             stmt.setInt(1, id);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void insertStatusDef(String label, int percent, int sortOrder) throws SQLException {
@@ -1721,6 +1772,7 @@ public class App {
             stmt.setInt(3, sortOrder);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void updateStatusDef(int id, String label, int percent) throws SQLException {
@@ -1732,6 +1784,7 @@ public class App {
             stmt.setInt(3, id);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void deleteStatusDef(int id) throws SQLException {
@@ -1741,6 +1794,7 @@ public class App {
             stmt.setInt(1, id);
             stmt.executeUpdate();
         }
+        invalidateDefsCache();
     }
 
     private static void seedWorkItemToAllNavOptions(String itemName) throws SQLException {
@@ -1759,6 +1813,7 @@ public class App {
             }
             stmt.executeBatch();
         }
+        invalidateProgressCache();
     }
 
     private static void renameWorkItemAcrossOptions(String oldName, String newName) throws SQLException {
@@ -1770,6 +1825,7 @@ public class App {
             stmt.setString(3, oldName);
             stmt.executeUpdate();
         }
+        invalidateProgressCache();
     }
 
     private static void deleteWorkItemAcrossOptions(String itemName) throws SQLException {
@@ -1779,6 +1835,7 @@ public class App {
             stmt.setString(1, itemName);
             stmt.executeUpdate();
         }
+        invalidateProgressCache();
     }
 
     private static void renameStatusAcrossOptions(String oldLabel, String newLabel) throws SQLException {
@@ -1790,27 +1847,102 @@ public class App {
             stmt.setString(3, oldLabel);
             stmt.executeUpdate();
         }
+        invalidateProgressCache();
     }
 
     private static int calculateOverallProgress(java.util.List<WorkItem> workItems) {
+        try {
+            return calculateOverallProgress(workItems, statusPercentMap());
+        } catch (SQLException ex) {
+            return 0;
+        }
+    }
+
+    private static int calculateOverallProgress(java.util.List<WorkItem> workItems, Map<String, Integer> percentByStatus) {
         if (workItems == null || workItems.isEmpty()) {
             return 0;
         }
         int total = 0;
         for (WorkItem item : workItems) {
-            total += statusToPercent(item.status);
+            total += statusToPercent(item.status, percentByStatus);
         }
         return Math.round(total / (float) workItems.size());
     }
 
-    private static java.util.List<OptionProgress> listOptionProgress() throws SQLException {
-        var result = new java.util.ArrayList<OptionProgress>();
-        for (NavOption option : listNavOptions()) {
-            ensureDefaultWorkItems(option);
-            java.util.List<WorkItem> items = listWorkItems(option.id);
-            result.add(new OptionProgress(option, items, calculateOverallProgress(items)));
+    private static final Object PROGRESS_CACHE_LOCK = new Object();
+    private static volatile java.util.List<OptionProgress> progressCache;
+    private static volatile long progressCacheAtMs;
+    private static final long PROGRESS_CACHE_TTL_MS = 3_000L;
+
+    private static final Object STATUS_DEFS_CACHE_LOCK = new Object();
+    private static volatile java.util.List<StatusDef> statusDefsCache;
+    private static volatile java.util.List<WorkItemDef> workItemDefsCache;
+
+    private static void invalidateProgressCache() {
+        synchronized (PROGRESS_CACHE_LOCK) {
+            progressCache = null;
+            progressCacheAtMs = 0L;
         }
-        return result;
+    }
+
+    private static void invalidateDefsCache() {
+        synchronized (STATUS_DEFS_CACHE_LOCK) {
+            statusDefsCache = null;
+            workItemDefsCache = null;
+        }
+        invalidateProgressCache();
+    }
+
+    /**
+     * Fast read path for Status/Mapview/PDF: one query for all work items, no seeding writes.
+     * Seeding is handled at core startup and when venues/work items are edited in Admin Panel.
+     */
+    private static java.util.List<OptionProgress> listOptionProgress() throws SQLException {
+        long now = System.currentTimeMillis();
+        java.util.List<OptionProgress> cached = progressCache;
+        if (cached != null && (now - progressCacheAtMs) < PROGRESS_CACHE_TTL_MS) {
+            return cached;
+        }
+        synchronized (PROGRESS_CACHE_LOCK) {
+            cached = progressCache;
+            now = System.currentTimeMillis();
+            if (cached != null && (now - progressCacheAtMs) < PROGRESS_CACHE_TTL_MS) {
+                return cached;
+            }
+
+            java.util.List<NavOption> options = listNavOptions();
+            java.util.List<WorkItemDef> defs = listWorkItemDefs();
+            Map<String, Integer> percentByStatus = statusPercentMap();
+
+            Map<Integer, Map<String, WorkItem>> itemsByOption = new LinkedHashMap<>();
+            try (Connection connection = openStatusDb();
+                 PreparedStatement stmt = connection.prepareStatement(
+                         "SELECT nav_option_id, item_name, status FROM nav_work_items");
+                 var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    int optionId = rs.getInt("nav_option_id");
+                    itemsByOption
+                            .computeIfAbsent(optionId, id -> new LinkedHashMap<>())
+                            .put(rs.getString("item_name"), new WorkItem(rs.getString("item_name"), rs.getString("status")));
+                }
+            }
+
+            var result = new java.util.ArrayList<OptionProgress>();
+            for (NavOption option : options) {
+                Map<String, WorkItem> byName = itemsByOption.getOrDefault(option.id, Map.of());
+                var ordered = new java.util.ArrayList<WorkItem>();
+                for (WorkItemDef def : defs) {
+                    WorkItem item = byName.get(def.name);
+                    if (item != null) {
+                        ordered.add(item);
+                    }
+                }
+                result.add(new OptionProgress(option, ordered, calculateOverallProgress(ordered, percentByStatus)));
+            }
+            progressCache = java.util.List.copyOf(result);
+            progressCacheAtMs = System.currentTimeMillis();
+            return progressCache;
+        }
     }
 
     private static void updateUsersRoleByLabel(String oldLabel, String newLabel) throws SQLException {
@@ -2588,6 +2720,14 @@ public class App {
         return connection;
     }
 
+    private static Connection openStatusDb() throws SQLException {
+        Connection connection = DriverManager.getConnection(STATUS_DB_URL);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=5000");
+        }
+        return connection;
+    }
+
     private static String createSession(String username) {
         String sessionId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
@@ -2660,11 +2800,14 @@ public class App {
                     exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
                     return null;
                 }
-                try (PreparedStatement touch = connection.prepareStatement(
-                        "UPDATE sessions SET last_activity_ms = ? WHERE session_id = ?")) {
-                    touch.setLong(1, now);
-                    touch.setString(2, sessionId);
-                    touch.executeUpdate();
+                // Touch at most every 30s to cut SQLite write contention across microservices.
+                if (now - lastActivityMs > 30_000L) {
+                    try (PreparedStatement touch = connection.prepareStatement(
+                            "UPDATE sessions SET last_activity_ms = ? WHERE session_id = ?")) {
+                        touch.setLong(1, now);
+                        touch.setString(2, sessionId);
+                        touch.executeUpdate();
+                    }
                 }
                 return username;
             }
@@ -3491,9 +3634,15 @@ public class App {
         if (selected == null) {
             detailHtml = "<div class=\"status-detail-empty\"><p>Select a venue to view individual progress.</p></div>";
         } else {
+            Map<String, Integer> percentByStatus;
+            try {
+                percentByStatus = statusPercentMap();
+            } catch (SQLException ex) {
+                percentByStatus = Map.of();
+            }
             StringBuilder detailRows = new StringBuilder();
             for (WorkItem item : selected.workItems) {
-                int pct = statusToPercent(item.status);
+                int pct = statusToPercent(item.status, percentByStatus);
                 detailRows.append("<tr>")
                         .append("<td>").append(escapeHtml(item.name)).append("</td>")
                         .append("<td>").append(escapeHtml(item.status)).append("</td>")
