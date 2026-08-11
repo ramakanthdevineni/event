@@ -80,6 +80,7 @@ public class App {
         server.createContext("/admin-panel", App::handleAdminPanel);
         server.createContext("/status/export", App::handleStatusExport);
         server.createContext("/status", App::handleStatus);
+        server.createContext("/mapview", App::handleMapview);
         server.createContext("/page", App::handleCustomPage);
         server.createContext("/change-password", App::handleChangePassword);
         server.createContext("/profile", App::handleProfile);
@@ -830,6 +831,32 @@ public class App {
             sendHtmlResponse(exchange, 200, buildStatusPage(username, user.firstName, navOptions, progressList, selected));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load status right now."));
+        }
+    }
+
+    private static void handleMapview(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            if (user.mustChangePassword) {
+                redirect(exchange, "/change-password");
+                return;
+            }
+
+            java.util.List<NavOption> navOptions = listNavOptions();
+            java.util.List<OptionProgress> progressList = listOptionProgress();
+            sendHtmlResponse(exchange, 200, buildMapviewPage(username, user.firstName, user.role, navOptions, progressList));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load map view right now."));
         }
     }
 
@@ -1771,6 +1798,7 @@ public class App {
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/admin-panel\">Admin Panel</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/status\">Status</a>");
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
             for (NavOption option : navOptions) {
                 nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
                         .append(escapeHtml(option.label)).append("</a>");
@@ -1778,7 +1806,9 @@ public class App {
         } else if (isStandardUserRole(userRole)) {
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
             nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
         } else {
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/mapview\">Mapview</a>");
             NavOption matched = findNavOptionByLabel(userRole, navOptions);
             if (matched != null) {
                 nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(matched.id).append("\">")
@@ -2713,6 +2743,238 @@ public class App {
                 "</form>" +
                 "<div style=\"margin-top:1.25rem;\">" + statusHtml + "</div></div>" +
                 "</main></div></body></html>";
+    }
+
+    private static String progressColor(int percent) {
+        int p = Math.max(0, Math.min(100, percent));
+        if (p >= 100) {
+            return "#16a34a";
+        }
+        if (p >= 75) {
+            return "#65a30d";
+        }
+        if (p >= 50) {
+            return "#ca8a04";
+        }
+        if (p >= 25) {
+            return "#ea580c";
+        }
+        return "#dc2626";
+    }
+
+    private static final String[][] CITY_ALIASES = {
+            {"riyadh", "riyad", "ar riyadh"},
+            {"jeddah", "jiddah", "jedda", "jiddha"},
+            {"makkah", "mecca", "mecca city"},
+            {"madinah", "medina", "al madinah"},
+            {"dammam", "ad dammam"},
+            {"khobar", "al khobar"},
+            {"jubail", "al jubail"},
+            {"tabuk"},
+            {"abha"},
+            {"taif", "at taif"},
+            {"yanbu"},
+            {"najran"},
+            {"jazan", "jizan", "gizan"},
+            {"hail", "ha'il"},
+            {"buraidah", "buraydah", "qassim", "al qassim"},
+            {"khamis mushait", "khamis mushayt"},
+            {"neom"}
+    };
+
+    private static final double[][] CITY_COORDS = {
+            {24.7136, 46.6753}, // riyadh
+            {21.4858, 39.1925}, // jeddah
+            {21.3891, 39.8579}, // makkah
+            {24.5247, 39.5692}, // madinah
+            {26.4207, 50.0888}, // dammam
+            {26.2172, 50.1971}, // khobar
+            {27.0174, 49.6225}, // jubail
+            {28.3838, 36.5550}, // tabuk
+            {18.2164, 42.5053}, // abha
+            {21.2703, 40.4158}, // taif
+            {24.0895, 38.0618}, // yanbu
+            {17.5651, 44.2289}, // najran
+            {16.8892, 42.5511}, // jazan
+            {27.5114, 41.7208}, // hail
+            {26.3260, 43.9750}, // buraidah/qassim
+            {18.3000, 42.7333}, // khamis mushait
+            {28.1120, 35.0760}  // neom
+    };
+
+    private static String normalizeVenueLabel(String label) {
+        return label.trim().toLowerCase(java.util.Locale.ROOT)
+                .replace('-', ' ')
+                .replace('_', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private static boolean containsWholePhrase(String text, String phrase) {
+        int idx = 0;
+        while ((idx = text.indexOf(phrase, idx)) >= 0) {
+            boolean startOk = idx == 0 || !Character.isLetterOrDigit(text.charAt(idx - 1));
+            int end = idx + phrase.length();
+            boolean endOk = end >= text.length() || !Character.isLetterOrDigit(text.charAt(end));
+            if (startOk && endOk) {
+                return true;
+            }
+            idx++;
+        }
+        return false;
+    }
+
+    /** Returns city index in CITY_COORDS, or -1 if no known city is found in the venue name. */
+    private static int resolveCityIndex(String label) {
+        if (label == null || label.isBlank()) {
+            return -1;
+        }
+        String key = normalizeVenueLabel(label);
+
+        int bestIndex = -1;
+        int bestAliasLength = -1;
+        for (int i = 0; i < CITY_ALIASES.length; i++) {
+            for (String alias : CITY_ALIASES[i]) {
+                if (key.equals(alias) || containsWholePhrase(key, alias)) {
+                    if (alias.length() > bestAliasLength) {
+                        bestAliasLength = alias.length();
+                        bestIndex = i;
+                    }
+                }
+            }
+        }
+        return bestIndex;
+    }
+
+    private static double[] offsetMapPoint(double x, double y, int indexAtCity) {
+        if (indexAtCity <= 0) {
+            return new double[]{x, y};
+        }
+        double angle = indexAtCity * (Math.PI * 2.0 / 6.0);
+        double radius = 24.0 + ((indexAtCity - 1) / 6) * 16.0;
+        return new double[]{x + Math.cos(angle) * radius, y + Math.sin(angle) * radius};
+    }
+
+    private static double[] projectSaudiMap(double lat, double lon) {
+        double minLon = 34.4;
+        double maxLon = 55.7;
+        double minLat = 16.0;
+        double maxLat = 32.2;
+        double width = 720;
+        double height = 560;
+        double x = ((lon - minLon) / (maxLon - minLon)) * width;
+        double y = ((maxLat - lat) / (maxLat - minLat)) * height;
+        return new double[]{x, y};
+    }
+
+    private static String saudiOutlinePath() {
+        // Simplified border/coast points (lat, lon) projected into the same viewBox as city markers.
+        double[][] points = {
+                {29.35, 34.95}, {28.10, 34.60}, {26.20, 36.40}, {24.10, 37.80}, {22.20, 38.90},
+                {20.00, 40.40}, {18.20, 41.50}, {16.90, 42.55}, {16.40, 42.80}, {17.20, 44.40},
+                {17.80, 47.20}, {18.90, 50.20}, {19.80, 52.20}, {22.00, 55.20}, {24.50, 51.60},
+                {26.40, 50.20}, {27.50, 49.20}, {28.50, 48.40}, {29.10, 46.60}, {30.00, 44.00},
+                {31.20, 41.50}, {32.15, 39.20}, {31.80, 37.20}, {30.50, 36.00}
+        };
+        StringBuilder path = new StringBuilder();
+        for (int i = 0; i < points.length; i++) {
+            double[] xy = projectSaudiMap(points[i][0], points[i][1]);
+            path.append(i == 0 ? "M" : " L")
+                    .append(String.format(java.util.Locale.US, "%.1f,%.1f", xy[0], xy[1]));
+        }
+        path.append(" Z");
+        return path.toString();
+    }
+
+    private static String buildMapviewPage(String username, String firstName, String userRole, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList) {
+        StringBuilder markers = new StringBuilder();
+        StringBuilder legendRows = new StringBuilder();
+        StringBuilder unmapped = new StringBuilder();
+        java.util.Map<Integer, Integer> markersPerCity = new java.util.HashMap<>();
+
+        for (OptionProgress progress : progressList) {
+            String color = progressColor(progress.overallPercent);
+            int cityIndex = resolveCityIndex(progress.option.label);
+            legendRows.append("<tr>")
+                    .append("<td><span class=\"swatch\" style=\"background:").append(color).append(";\"></span>")
+                    .append(escapeHtml(progress.option.label)).append("</td>")
+                    .append("<td>").append(progress.overallPercent).append("%</td>")
+                    .append("</tr>");
+
+            if (cityIndex < 0) {
+                unmapped.append("<li>").append(escapeHtml(progress.option.label))
+                        .append(" (").append(progress.overallPercent).append("%)</li>");
+                continue;
+            }
+
+            int slot = markersPerCity.merge(cityIndex, 1, Integer::sum) - 1;
+            double[] xy = projectSaudiMap(CITY_COORDS[cityIndex][0], CITY_COORDS[cityIndex][1]);
+            xy = offsetMapPoint(xy[0], xy[1], slot);
+            markers.append("<g class=\"venue-marker\">")
+                    .append("<circle cx=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
+                    .append("\" cy=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1]))
+                    .append("\" r=\"14\" fill=\"").append(color).append("\" stroke=\"#ffffff\" stroke-width=\"2\"/>")
+                    .append("<text x=\"").append(String.format(java.util.Locale.US, "%.1f", xy[0]))
+                    .append("\" y=\"").append(String.format(java.util.Locale.US, "%.1f", xy[1] - 20))
+                    .append("\" text-anchor=\"middle\" class=\"marker-label\">")
+                    .append(escapeHtml(progress.option.label))
+                    .append(" - ").append(progress.overallPercent).append("%</text>")
+                    .append("</g>");
+        }
+
+        String unmappedHtml = unmapped.length() == 0
+                ? ""
+                : "<div class=\"unmapped\"><h3>Venues without map location</h3><ul>" + unmapped + "</ul>" +
+                "<p class=\"hint\">Use a Saudi city name (for example Jeddah or Riyadh) as the venue name to place it on the map.</p></div>";
+
+        return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>Mapview</title><style>" + sidebarLayoutStyles() +
+                " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
+                " .map-layout{display:flex;gap:1.5rem;align-items:flex-start;flex-wrap:wrap;}" +
+                " .map-card,.legend-card{padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
+                " .map-card{flex:2 1 520px;min-width:0;}" +
+                " .legend-card{flex:1 1 240px;}" +
+                " .map-card h1,.legend-card h2{margin:0 0 0.75rem;}" +
+                " .map-card p{margin:0 0 1rem;opacity:0.9;}" +
+                " .map-svg{width:100%;height:auto;display:block;background:radial-gradient(circle at 30% 20%,#1e3a8a,#0f172a 70%);border-radius:12px;}" +
+                " .land{fill:#1d4ed8;stroke:#93c5fd;stroke-width:2;opacity:0.85;}" +
+                " .marker-label{fill:#f8fafc;font-size:13px;font-family:Arial,Helvetica,sans-serif;paint-order:stroke;stroke:#0f172a;stroke-width:3px;}" +
+                " .legend-table{width:100%;border-collapse:collapse;}" +
+                " .legend-table th,.legend-table td{padding:0.65rem 0.4rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);}" +
+                " .legend-table th{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;opacity:0.7;}" +
+                " .swatch{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:0.55rem;vertical-align:middle;border:1px solid rgba(255,255,255,0.5);}" +
+                " .scale{display:flex;flex-wrap:wrap;gap:0.6rem;margin:0 0 1rem;font-size:0.85rem;opacity:0.95;}" +
+                " .scale span{display:inline-flex;align-items:center;gap:0.35rem;}" +
+                " .unmapped{margin-top:1rem;}" +
+                " .unmapped h3{margin:0 0 0.5rem;font-size:1rem;}" +
+                " .unmapped ul{margin:0;padding-left:1.2rem;}" +
+                " .hint{margin:0.6rem 0 0;font-size:0.85rem;opacity:0.75;}" +
+                "</style></head><body>" +
+                "<div class=\"container\">" + buildSidebarHtml(username, userRole, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"map-layout\">" +
+                "<div class=\"map-card\"><h1>Mapview</h1>" +
+                "<p>Saudi Arabia venues colored by completion progress.</p>" +
+                "<div class=\"scale\">" +
+                "<span><i class=\"swatch\" style=\"background:#dc2626;\"></i>0-24%</span>" +
+                "<span><i class=\"swatch\" style=\"background:#ea580c;\"></i>25-49%</span>" +
+                "<span><i class=\"swatch\" style=\"background:#ca8a04;\"></i>50-74%</span>" +
+                "<span><i class=\"swatch\" style=\"background:#65a30d;\"></i>75-99%</span>" +
+                "<span><i class=\"swatch\" style=\"background:#16a34a;\"></i>100%</span>" +
+                "</div>" +
+                "<svg class=\"map-svg\" viewBox=\"0 0 720 560\" role=\"img\" aria-label=\"Map of Saudi Arabia with venue progress\">" +
+                "<path class=\"land\" d=\"" + saudiOutlinePath() + "\"/>" +
+                markers +
+                "</svg>" +
+                unmappedHtml +
+                "</div>" +
+                "<div class=\"legend-card\"><h2>Venue Progress</h2>" +
+                "<table class=\"legend-table\"><thead><tr><th>Venue</th><th>Progress</th></tr></thead><tbody>" +
+                (legendRows.length() == 0
+                        ? "<tr><td colspan=\"2\">No venues yet. Add venues in Admin Panel.</td></tr>"
+                        : legendRows.toString()) +
+                "</tbody></table></div>" +
+                "</div></main></div></body></html>";
     }
 
     private static String buildStatusPage(String username, String firstName, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList, OptionProgress selected) {
