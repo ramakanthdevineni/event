@@ -85,20 +85,33 @@ public class App {
             server.createContext("/profile", App::handleProfile);
             server.createContext("/logout", App::handleLogout);
             server.createContext("/", App::handleHome);
+
+            server.createContext("/api/login", App::apiLogin);
+            server.createContext("/api/logout", App::apiLogout);
+            server.createContext("/api/me", App::apiMe);
+            server.createContext("/api/nav", App::apiNav);
+            server.createContext("/api/profile", App::apiProfile);
+            server.createContext("/api/change-password", App::apiChangePassword);
+            server.createContext("/api/venues", App::apiVenues);
         }
         if (serves(service, "users")) {
             server.createContext("/users", App::handleUsers);
             server.createContext("/add-user", App::handleAddUser);
+            server.createContext("/api/users", App::apiUsers);
         }
         if (serves(service, "admin")) {
             server.createContext("/admin-panel", App::handleAdminPanel);
+            server.createContext("/api/admin", App::apiAdmin);
         }
         if (serves(service, "status")) {
             server.createContext("/status/export", App::handleStatusExport);
             server.createContext("/status", App::handleStatus);
+            server.createContext("/api/status/export", App::apiStatusExport);
+            server.createContext("/api/status", App::apiStatus);
         }
         if (serves(service, "mapview")) {
             server.createContext("/mapview", App::handleMapview);
+            server.createContext("/api/mapview", App::apiMapview);
         }
     }
 
@@ -4006,5 +4019,935 @@ public class App {
 
     private static String escapeHtml(String input) {
         return input == null ? "" : input.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
+    }
+
+    // --- JSON API helpers and handlers for React SPA ---
+
+    private static String jsonEscape(String input) {
+        if (input == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(input.length() + 16);
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static void sendJson(HttpExchange exchange, int statusCode, String json) throws IOException {
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.sendResponseHeaders(statusCode, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    private static void sendJsonMessage(HttpExchange exchange, int statusCode, String message) throws IOException {
+        sendJson(exchange, statusCode, "{\"message\":\"" + jsonEscape(message) + "\"}");
+    }
+
+    private static String readBody(HttpExchange exchange) throws IOException {
+        return new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    }
+
+    private static String jsonGetString(String json, String key) {
+        if (json == null || key == null) {
+            return null;
+        }
+        String pattern = "\"" + key + "\"";
+        int idx = json.indexOf(pattern);
+        if (idx < 0) {
+            return null;
+        }
+        int colon = json.indexOf(':', idx + pattern.length());
+        if (colon < 0) {
+            return null;
+        }
+        int i = colon + 1;
+        while (i < json.length() && Character.isWhitespace(json.charAt(i))) {
+            i++;
+        }
+        if (i >= json.length()) {
+            return null;
+        }
+        char c = json.charAt(i);
+        if (c == '"') {
+            StringBuilder sb = new StringBuilder();
+            i++;
+            while (i < json.length()) {
+                char ch = json.charAt(i++);
+                if (ch == '\\' && i < json.length()) {
+                    char n = json.charAt(i++);
+                    sb.append(n == 'n' ? '\n' : n == 'r' ? '\r' : n == 't' ? '\t' : n);
+                } else if (ch == '"') {
+                    break;
+                } else {
+                    sb.append(ch);
+                }
+            }
+            return sb.toString();
+        }
+        if (c == 'n' && json.startsWith("null", i)) {
+            return null;
+        }
+        int end = i;
+        while (end < json.length() && ",}]".indexOf(json.charAt(end)) < 0) {
+            end++;
+        }
+        return json.substring(i, end).trim();
+    }
+
+    private static int jsonGetInt(String json, String key, int fallback) {
+        String raw = jsonGetString(json, key);
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(raw.replaceAll("[^0-9-]", ""));
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
+    }
+
+    private static List<String> jsonGetStringArray(String json, String key) {
+        List<String> out = new ArrayList<>();
+        if (json == null || key == null) {
+            return out;
+        }
+        String pattern = "\"" + key + "\"";
+        int idx = json.indexOf(pattern);
+        if (idx < 0) {
+            return out;
+        }
+        int bracket = json.indexOf('[', idx + pattern.length());
+        if (bracket < 0) {
+            return out;
+        }
+        int end = json.indexOf(']', bracket + 1);
+        if (end < 0) {
+            return out;
+        }
+        String inner = json.substring(bracket + 1, end);
+        int i = 0;
+        while (i < inner.length()) {
+            while (i < inner.length() && (Character.isWhitespace(inner.charAt(i)) || inner.charAt(i) == ',')) {
+                i++;
+            }
+            if (i >= inner.length()) {
+                break;
+            }
+            if (inner.charAt(i) != '"') {
+                break;
+            }
+            i++;
+            StringBuilder sb = new StringBuilder();
+            while (i < inner.length()) {
+                char ch = inner.charAt(i++);
+                if (ch == '\\' && i < inner.length()) {
+                    sb.append(inner.charAt(i++));
+                } else if (ch == '"') {
+                    break;
+                } else {
+                    sb.append(ch);
+                }
+            }
+            out.add(sb.toString());
+        }
+        return out;
+    }
+
+    private static String resolveSpaHomePath(UserRecord user, java.util.List<NavOption> navOptions) {
+        if (hasAdminRole(user.role) || hasUserRole(user.role) || isStandardUserRole(user.role)) {
+            return "/dashboard";
+        }
+        List<NavOption> venues = matchedVenueOptions(user.role, navOptions);
+        return venues.isEmpty() ? "/dashboard" : "/venues/" + venues.get(0).id;
+    }
+
+    private static String buildNavJson(UserRecord user, java.util.List<NavOption> navOptions) {
+        StringBuilder nav = new StringBuilder("[");
+        boolean first = true;
+        if (hasAdminRole(user.role)) {
+            first = appendNavItem(nav, first, "Dashboard", "/dashboard");
+            first = appendNavItem(nav, first, "Users", "/users");
+            first = appendNavItem(nav, first, "Admin Panel", "/admin");
+            first = appendNavItem(nav, first, "Status", "/status");
+            first = appendNavItem(nav, first, "Mapview", "/mapview");
+            for (NavOption option : navOptions) {
+                first = appendNavItem(nav, first, option.label, "/venues/" + option.id);
+            }
+        } else {
+            List<NavOption> venueMatches = matchedVenueOptions(user.role, navOptions);
+            boolean standardAccess = hasUserRole(user.role) || venueMatches.isEmpty();
+            if (standardAccess) {
+                first = appendNavItem(nav, first, "Dashboard", "/dashboard");
+                first = appendNavItem(nav, first, "Users", "/users");
+                first = appendNavItem(nav, first, "Mapview", "/mapview");
+            } else {
+                first = appendNavItem(nav, first, "Mapview", "/mapview");
+            }
+            for (NavOption matched : venueMatches) {
+                first = appendNavItem(nav, first, matched.label, "/venues/" + matched.id);
+            }
+        }
+        nav.append("]");
+        return nav.toString();
+    }
+
+    private static boolean appendNavItem(StringBuilder nav, boolean first, String label, String href) {
+        if (!first) {
+            nav.append(',');
+        }
+        nav.append("{\"id\":0,\"label\":\"").append(jsonEscape(label))
+                .append("\",\"href\":\"").append(jsonEscape(href)).append("\"}");
+        return false;
+    }
+
+    private static String buildMeJson(String username, UserRecord user, java.util.List<NavOption> navOptions) throws SQLException {
+        Map<String, String> profile = findUserProfile(username);
+        String firstName = profile != null ? profile.getOrDefault("first_name", user.firstName) : user.firstName;
+        String lastName = profile != null ? profile.getOrDefault("last_name", "") : "";
+        String email = profile != null ? profile.getOrDefault("email", "") : "";
+        List<String> roles = normalizeRoles(parseRoles(user.role));
+        StringBuilder rolesJson = new StringBuilder("[");
+        for (int i = 0; i < roles.size(); i++) {
+            if (i > 0) {
+                rolesJson.append(',');
+            }
+            rolesJson.append('"').append(jsonEscape(roles.get(i))).append('"');
+        }
+        rolesJson.append(']');
+        return "{"
+                + "\"username\":\"" + jsonEscape(username) + "\","
+                + "\"firstName\":\"" + jsonEscape(firstName) + "\","
+                + "\"lastName\":\"" + jsonEscape(lastName) + "\","
+                + "\"email\":\"" + jsonEscape(email) + "\","
+                + "\"role\":\"" + jsonEscape(user.role) + "\","
+                + "\"roles\":" + rolesJson + ","
+                + "\"isAdmin\":" + (hasAdminRole(user.role) ? "true" : "false") + ","
+                + "\"mustChangePassword\":" + (user.mustChangePassword ? "true" : "false") + ","
+                + "\"homePath\":\"" + jsonEscape(resolveSpaHomePath(user, navOptions)) + "\","
+                + "\"nav\":" + buildNavJson(user, navOptions)
+                + "}";
+    }
+
+    private static void apiLogin(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendJsonMessage(exchange, 405, "Method not allowed");
+            return;
+        }
+        String body = readBody(exchange);
+        String username = jsonGetString(body, "username");
+        String password = jsonGetString(body, "password");
+        if (username == null || username.isBlank() || password == null || password.isBlank()) {
+            sendJsonMessage(exchange, 400, "Please provide both username and password.");
+            return;
+        }
+        username = username.trim();
+        password = password.trim();
+        try {
+            if (!userExists(username)) {
+                sendJsonMessage(exchange, 401, "Invalid User");
+                return;
+            }
+            UserRecord user = findUserByCredentials(username, password);
+            if (user == null) {
+                sendJsonMessage(exchange, 401, "Invalid Password");
+                return;
+            }
+            if (!user.enabled) {
+                sendJsonMessage(exchange, 403, "This account has been disabled. Please contact an administrator.");
+                return;
+            }
+            String sessionId = createSession(username);
+            exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=" + sessionId + "; Path=/; HttpOnly");
+            sendJson(exchange, 200, buildMeJson(username, user, listNavOptions()));
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to verify credentials right now.");
+        }
+    }
+
+    private static void apiLogout(HttpExchange exchange) throws IOException {
+        String sessionId = getSessionIdFromCookie(exchange);
+        if (sessionId != null) {
+            destroySession(sessionId);
+        }
+        exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
+        sendJsonMessage(exchange, 200, "Logged out");
+    }
+
+    private static void apiMe(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null || !user.enabled) {
+                sendJsonMessage(exchange, 401, "Unauthorized");
+                return;
+            }
+            sendJson(exchange, 200, buildMeJson(username, user, listNavOptions()));
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to load session");
+        }
+    }
+
+    private static void apiNav(HttpExchange exchange) throws IOException {
+        apiMe(exchange);
+    }
+
+    private static void apiProfile(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                Map<String, String> profile = findUserProfile(username);
+                if (profile == null) {
+                    sendJsonMessage(exchange, 404, "Profile not found");
+                    return;
+                }
+                sendJson(exchange, 200, "{"
+                        + "\"username\":\"" + jsonEscape(username) + "\","
+                        + "\"firstName\":\"" + jsonEscape(profile.get("first_name")) + "\","
+                        + "\"lastName\":\"" + jsonEscape(profile.get("last_name")) + "\","
+                        + "\"email\":\"" + jsonEscape(profile.get("email")) + "\""
+                        + "}");
+                return;
+            }
+            if ("PUT".equalsIgnoreCase(exchange.getRequestMethod()) || "POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                String body = readBody(exchange);
+                String firstName = nullToEmpty(jsonGetString(body, "firstName")).trim();
+                String lastName = nullToEmpty(jsonGetString(body, "lastName")).trim();
+                String email = nullToEmpty(jsonGetString(body, "email")).trim();
+                String password = nullToEmpty(jsonGetString(body, "password")).trim();
+                if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+                    sendJsonMessage(exchange, 400, "First name, last name, and email are required.");
+                    return;
+                }
+                updateUserProfile(username, firstName, lastName, email, password);
+                sendJsonMessage(exchange, 200, "Profile updated successfully.");
+                return;
+            }
+            sendJsonMessage(exchange, 405, "Method not allowed");
+        } catch (SQLException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.contains("UNIQUE")) {
+                sendJsonMessage(exchange, 400, "The email address is already in use.");
+            } else {
+                sendJsonMessage(exchange, 500, "Unable to save profile changes.");
+            }
+        }
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
+    }
+
+    private static void apiChangePassword(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendJsonMessage(exchange, 405, "Method not allowed");
+            return;
+        }
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        String body = readBody(exchange);
+        String password = nullToEmpty(jsonGetString(body, "password")).trim();
+        String confirmPassword = nullToEmpty(jsonGetString(body, "confirmPassword")).trim();
+        if (password.isEmpty() || confirmPassword.isEmpty()) {
+            sendJsonMessage(exchange, 400, "Both password fields are required.");
+            return;
+        }
+        if (!password.equals(confirmPassword)) {
+            sendJsonMessage(exchange, 400, "Passwords do not match. Please re-enter them.");
+            return;
+        }
+        try {
+            updatePasswordAndClearResetFlag(username, password);
+            UserRecord user = findUserByUsername(username);
+            String home = user == null ? "/dashboard" : resolveSpaHomePath(user, listNavOptions());
+            sendJson(exchange, 200, "{\"message\":\"Password updated\",\"homePath\":\"" + jsonEscape(home) + "\"}");
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to update your password right now.");
+        }
+    }
+
+    private static void apiVenues(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        String suffix = path.substring("/api/venues".length());
+        if (suffix.startsWith("/")) {
+            suffix = suffix.substring(1);
+        }
+        if (suffix.isEmpty()) {
+            sendJsonMessage(exchange, 400, "Venue id required");
+            return;
+        }
+        int slash = suffix.indexOf('/');
+        String idPart = slash >= 0 ? suffix.substring(0, slash) : suffix;
+        Integer optionId = parseNavOptionId(idPart);
+        if (optionId == null) {
+            sendJsonMessage(exchange, 400, "Invalid venue id");
+            return;
+        }
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null || !user.enabled) {
+                sendJsonMessage(exchange, 401, "Unauthorized");
+                return;
+            }
+            NavOption option = findNavOptionById(optionId);
+            if (option == null) {
+                sendJsonMessage(exchange, 404, "Venue not found");
+                return;
+            }
+            if (!canAccessCustomPage(user, option)) {
+                sendJsonMessage(exchange, 403, "Forbidden");
+                return;
+            }
+            if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                java.util.List<WorkItem> workItems = listWorkItems(optionId);
+                java.util.List<StatusDef> statusDefs = listStatusDefs();
+                StringBuilder items = new StringBuilder("[");
+                for (int i = 0; i < workItems.size(); i++) {
+                    WorkItem item = workItems.get(i);
+                    if (i > 0) items.append(',');
+                    items.append("{\"name\":\"").append(jsonEscape(item.name))
+                            .append("\",\"status\":\"").append(jsonEscape(item.status)).append("\"}");
+                }
+                items.append(']');
+                StringBuilder statuses = new StringBuilder("[");
+                for (int i = 0; i < statusDefs.size(); i++) {
+                    StatusDef s = statusDefs.get(i);
+                    if (i > 0) statuses.append(',');
+                    statuses.append("{\"id\":").append(s.id)
+                            .append(",\"label\":\"").append(jsonEscape(s.label))
+                            .append("\",\"percent\":").append(s.percentValue)
+                            .append(",\"sortOrder\":").append(s.sortOrder).append('}');
+                }
+                statuses.append(']');
+                sendJson(exchange, 200, "{\"id\":" + option.id
+                        + ",\"label\":\"" + jsonEscape(option.label) + "\""
+                        + ",\"workItems\":" + items
+                        + ",\"statuses\":" + statuses + "}");
+                return;
+            }
+            if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                String body = readBody(exchange);
+                String itemName = nullToEmpty(jsonGetString(body, "itemName")).trim();
+                String status = nullToEmpty(jsonGetString(body, "status")).trim();
+                if (itemName.isEmpty() || !isValidWorkItemName(itemName) || !isValidWorkItemStatus(status)) {
+                    sendJsonMessage(exchange, 400, "Invalid work item status update.");
+                    return;
+                }
+                updateWorkItemStatus(optionId, itemName, status);
+                sendJsonMessage(exchange, 200, "Updated");
+                return;
+            }
+            sendJsonMessage(exchange, 405, "Method not allowed");
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to load venue");
+        }
+    }
+
+    private static void apiUsers(HttpExchange exchange) throws IOException {
+        String currentUsername = getSessionUsername(exchange);
+        if (currentUsername == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            UserRecord current = findUserByUsername(currentUsername);
+            if (current == null || !current.enabled) {
+                sendJsonMessage(exchange, 401, "Unauthorized");
+                return;
+            }
+            if (!hasAdminRole(current.role) && !hasUserRole(current.role)) {
+                sendJsonMessage(exchange, 403, "Forbidden");
+                return;
+            }
+            boolean canManage = hasAdminRole(current.role);
+            java.util.List<NavOption> navOptions = listNavOptions();
+
+            if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                var users = listAllUsers();
+                StringBuilder usersJson = new StringBuilder("[");
+                for (int i = 0; i < users.size(); i++) {
+                    UserEntry u = users.get(i);
+                    if (i > 0) usersJson.append(',');
+                    List<String> roles = normalizeRoles(parseRoles(u.role));
+                    StringBuilder rolesJson = new StringBuilder("[");
+                    for (int r = 0; r < roles.size(); r++) {
+                        if (r > 0) rolesJson.append(',');
+                        rolesJson.append('"').append(jsonEscape(roles.get(r))).append('"');
+                    }
+                    rolesJson.append(']');
+                    usersJson.append('{')
+                            .append("\"username\":\"").append(jsonEscape(u.username)).append("\",")
+                            .append("\"firstName\":\"").append(jsonEscape(u.firstName)).append("\",")
+                            .append("\"lastName\":\"").append(jsonEscape(u.lastName)).append("\",")
+                            .append("\"email\":\"").append(jsonEscape(u.email)).append("\",")
+                            .append("\"role\":\"").append(jsonEscape(u.role)).append("\",")
+                            .append("\"roles\":").append(rolesJson).append(',')
+                            .append("\"enabled\":").append(u.enabled ? "true" : "false").append(',')
+                            .append("\"isAdmin\":").append(hasAdminRole(u.role) ? "true" : "false")
+                            .append('}');
+                }
+                usersJson.append(']');
+                StringBuilder venuesJson = new StringBuilder("[");
+                for (int i = 0; i < navOptions.size(); i++) {
+                    NavOption o = navOptions.get(i);
+                    if (i > 0) venuesJson.append(',');
+                    venuesJson.append("{\"id\":").append(o.id).append(",\"label\":\"").append(jsonEscape(o.label)).append("\"}");
+                }
+                venuesJson.append(']');
+                sendJson(exchange, 200, "{\"users\":" + usersJson + ",\"venues\":" + venuesJson
+                        + ",\"canManage\":" + (canManage ? "true" : "false") + "}");
+                return;
+            }
+
+            if (!canManage) {
+                sendJsonMessage(exchange, 403, "You do not have permission to modify users.");
+                return;
+            }
+
+            String body = readBody(exchange);
+            if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                String firstName = nullToEmpty(jsonGetString(body, "firstName")).trim();
+                String lastName = nullToEmpty(jsonGetString(body, "lastName")).trim();
+                String email = nullToEmpty(jsonGetString(body, "email")).trim();
+                if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+                    sendJsonMessage(exchange, 400, "First name, last name, and email are required.");
+                    return;
+                }
+                String newUsername = email.toLowerCase(Locale.ROOT);
+                try {
+                    saveUser(firstName, lastName, newUsername, email, DEFAULT_NEW_USER_PASSWORD, false, true);
+                    sendJson(exchange, 200, "{\"message\":\"User created. Email is the username and default password is "
+                            + jsonEscape(DEFAULT_NEW_USER_PASSWORD) + ".\"}");
+                } catch (SQLException ex) {
+                    if (ex.getMessage() != null && ex.getMessage().contains("UNIQUE")) {
+                        sendJsonMessage(exchange, 400, "A user with that email already exists.");
+                    } else {
+                        sendJsonMessage(exchange, 500, "Unable to create the user.");
+                    }
+                }
+                return;
+            }
+
+            if ("PUT".equalsIgnoreCase(exchange.getRequestMethod()) || "POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                String action = nullToEmpty(jsonGetString(body, "action")).trim().toLowerCase(Locale.ROOT);
+                String target = nullToEmpty(jsonGetString(body, "username")).trim();
+                if (target.isEmpty()) {
+                    sendJsonMessage(exchange, 400, "Username required");
+                    return;
+                }
+                List<String> roles = normalizeRoles(jsonGetStringArray(body, "roles"));
+                if (roles.isEmpty()) {
+                    String roleCsv = nullToEmpty(jsonGetString(body, "role"));
+                    roles = normalizeRoles(parseRoles(roleCsv));
+                }
+                switch (action) {
+                    case "delete" -> {
+                        if (target.equals(currentUsername)) {
+                            sendJsonMessage(exchange, 400, "You cannot delete your own account.");
+                            return;
+                        }
+                        deleteUser(target);
+                        sendJsonMessage(exchange, 200, "User deleted");
+                    }
+                    case "toggle-enabled" -> {
+                        if (target.equals(currentUsername)) {
+                            sendJsonMessage(exchange, 400, "You cannot disable your own account.");
+                            return;
+                        }
+                        if (DEFAULT_ADMIN_USERNAME.equals(target)) {
+                            sendJsonMessage(exchange, 400, "The default admin account cannot be disabled.");
+                            return;
+                        }
+                        UserEntry targetUser = findUserEntryByUsername(target);
+                        if (targetUser == null) {
+                            sendJsonMessage(exchange, 404, "User not found.");
+                            return;
+                        }
+                        boolean newEnabled = !targetUser.enabled;
+                        setUserEnabled(target, newEnabled);
+                        if (!newEnabled) {
+                            destroySessionsForUser(target);
+                        }
+                        sendJsonMessage(exchange, 200, "User status updated");
+                    }
+                    case "update-role" -> {
+                        if (!isValidRoles(roles, navOptions)) {
+                            sendJsonMessage(exchange, 400, "Invalid role selected.");
+                            return;
+                        }
+                        updateUserRole(target, serializeRoles(roles));
+                        sendJsonMessage(exchange, 200, "Roles updated");
+                    }
+                    case "update" -> {
+                        String firstName = nullToEmpty(jsonGetString(body, "firstName")).trim();
+                        String lastName = nullToEmpty(jsonGetString(body, "lastName")).trim();
+                        String email = nullToEmpty(jsonGetString(body, "email")).trim();
+                        if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+                            sendJsonMessage(exchange, 400, "All fields are required.");
+                            return;
+                        }
+                        if (!isValidRoles(roles, navOptions)) {
+                            sendJsonMessage(exchange, 400, "Invalid role selected.");
+                            return;
+                        }
+                        boolean updated = updateUserDetails(target, firstName, lastName, email, serializeRoles(roles));
+                        if (!updated) {
+                            sendJsonMessage(exchange, 500, "No changes were applied.");
+                            return;
+                        }
+                        sendJsonMessage(exchange, 200, "User updated");
+                    }
+                    default -> sendJsonMessage(exchange, 400, "Unknown action");
+                }
+                return;
+            }
+            sendJsonMessage(exchange, 405, "Method not allowed");
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to process users request");
+        }
+    }
+
+    private static void apiAdmin(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null || !hasAdminRole(user.role)) {
+                sendJsonMessage(exchange, 403, "Forbidden");
+                return;
+            }
+            if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                java.util.List<NavOption> venues = listNavOptions();
+                java.util.List<WorkItemDef> workItems = listWorkItemDefs();
+                java.util.List<StatusDef> statuses = listStatusDefs();
+                StringBuilder v = new StringBuilder("[");
+                for (int i = 0; i < venues.size(); i++) {
+                    if (i > 0) v.append(',');
+                    v.append("{\"id\":").append(venues.get(i).id).append(",\"label\":\"")
+                            .append(jsonEscape(venues.get(i).label)).append("\"}");
+                }
+                v.append(']');
+                StringBuilder w = new StringBuilder("[");
+                for (int i = 0; i < workItems.size(); i++) {
+                    WorkItemDef d = workItems.get(i);
+                    if (i > 0) w.append(',');
+                    w.append("{\"id\":").append(d.id).append(",\"name\":\"").append(jsonEscape(d.name))
+                            .append("\",\"sortOrder\":").append(d.sortOrder).append('}');
+                }
+                w.append(']');
+                StringBuilder s = new StringBuilder("[");
+                for (int i = 0; i < statuses.size(); i++) {
+                    StatusDef d = statuses.get(i);
+                    if (i > 0) s.append(',');
+                    s.append("{\"id\":").append(d.id).append(",\"label\":\"").append(jsonEscape(d.label))
+                            .append("\",\"percent\":").append(d.percentValue)
+                            .append(",\"sortOrder\":").append(d.sortOrder).append('}');
+                }
+                s.append(']');
+                sendJson(exchange, 200, "{\"venues\":" + v + ",\"workItems\":" + w + ",\"statuses\":" + s + "}");
+                return;
+            }
+
+            String body = readBody(exchange);
+            String action = nullToEmpty(jsonGetString(body, "action")).trim().toLowerCase(Locale.ROOT);
+            String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+            if ("DELETE".equals(method) && action.isEmpty()) {
+                action = nullToEmpty(jsonGetString(body, "action")).trim().toLowerCase(Locale.ROOT);
+            }
+
+            switch (action) {
+                case "venue-add", "add" -> {
+                    String label = nullToEmpty(jsonGetString(body, "label")).trim();
+                    if (label.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Venue name is required.");
+                        return;
+                    }
+                    saveNavOption(label);
+                    sendJsonMessage(exchange, 200, "Venue added");
+                }
+                case "venue-update", "update" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    String label = nullToEmpty(jsonGetString(body, "label")).trim();
+                    if (id == null || label.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Invalid venue update.");
+                        return;
+                    }
+                    updateNavOption(id, label);
+                    sendJsonMessage(exchange, 200, "Venue updated");
+                }
+                case "venue-delete", "delete" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    if (id == null) {
+                        sendJsonMessage(exchange, 400, "Invalid venue.");
+                        return;
+                    }
+                    deleteNavOption(id);
+                    sendJsonMessage(exchange, 200, "Venue deleted");
+                }
+                case "work-item-add" -> {
+                    String name = nullToEmpty(jsonGetString(body, "name")).trim();
+                    if (name.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Work item name is required.");
+                        return;
+                    }
+                    insertWorkItemDef(name, nextWorkItemSortOrder());
+                    seedWorkItemToAllNavOptions(name);
+                    sendJsonMessage(exchange, 200, "Work item added");
+                }
+                case "work-item-update" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    String name = nullToEmpty(jsonGetString(body, "name")).trim();
+                    if (id == null || name.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Invalid work item update.");
+                        return;
+                    }
+                    WorkItemDef existing = findWorkItemDefById(id);
+                    if (existing == null) {
+                        sendJsonMessage(exchange, 404, "Work item not found.");
+                        return;
+                    }
+                    updateWorkItemDef(id, name);
+                    if (!existing.name.equals(name)) {
+                        renameWorkItemAcrossOptions(existing.name, name);
+                    }
+                    sendJsonMessage(exchange, 200, "Work item updated");
+                }
+                case "work-item-delete" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    if (id == null) {
+                        sendJsonMessage(exchange, 400, "Invalid work item.");
+                        return;
+                    }
+                    WorkItemDef existing = findWorkItemDefById(id);
+                    if (existing != null) {
+                        deleteWorkItemDef(id);
+                        deleteWorkItemAcrossOptions(existing.name);
+                    }
+                    sendJsonMessage(exchange, 200, "Work item deleted");
+                }
+                case "status-add" -> {
+                    String label = nullToEmpty(jsonGetString(body, "label")).trim();
+                    int percent = jsonGetInt(body, "percent", 0);
+                    if (label.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Status label is required.");
+                        return;
+                    }
+                    insertStatusDef(label, percent, nextStatusSortOrder());
+                    sendJsonMessage(exchange, 200, "Status added");
+                }
+                case "status-update" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    String label = nullToEmpty(jsonGetString(body, "label")).trim();
+                    if (id == null || label.isEmpty()) {
+                        sendJsonMessage(exchange, 400, "Invalid status update.");
+                        return;
+                    }
+                    StatusDef existing = findStatusDefById(id);
+                    if (existing == null) {
+                        sendJsonMessage(exchange, 404, "Status not found.");
+                        return;
+                    }
+                    int percent = jsonGetInt(body, "percent", existing.percentValue);
+                    updateStatusDef(id, label, percent);
+                    if (!existing.label.equals(label)) {
+                        renameStatusAcrossOptions(existing.label, label);
+                    }
+                    sendJsonMessage(exchange, 200, "Status updated");
+                }
+                case "status-delete" -> {
+                    Integer id = parseNavOptionId(String.valueOf(jsonGetInt(body, "id", -1)));
+                    if (id == null) {
+                        sendJsonMessage(exchange, 400, "Invalid status.");
+                        return;
+                    }
+                    java.util.List<StatusDef> statuses = listStatusDefs();
+                    if (statuses.size() <= 1) {
+                        sendJsonMessage(exchange, 400, "At least one status option is required.");
+                        return;
+                    }
+                    StatusDef existing = findStatusDefById(id);
+                    if (existing != null) {
+                        deleteStatusDef(id);
+                    }
+                    sendJsonMessage(exchange, 200, "Status deleted");
+                }
+                default -> sendJsonMessage(exchange, 400, "Unknown action");
+            }
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to update admin settings.");
+        }
+    }
+
+    private static String venueProgressJson(OptionProgress progress) {
+        String color = progressColor(progress.overallPercent);
+        StringBuilder items = new StringBuilder("[");
+        for (int i = 0; i < progress.workItems.size(); i++) {
+            WorkItem item = progress.workItems.get(i);
+            if (i > 0) items.append(',');
+            items.append("{\"name\":\"").append(jsonEscape(item.name))
+                    .append("\",\"status\":\"").append(jsonEscape(item.status)).append("\"}");
+        }
+        items.append(']');
+        return "{\"id\":" + progress.option.id
+                + ",\"label\":\"" + jsonEscape(progress.option.label) + "\""
+                + ",\"percent\":" + progress.overallPercent
+                + ",\"color\":\"" + jsonEscape(color) + "\""
+                + ",\"workItems\":" + items + "}";
+    }
+
+    private static void apiStatus(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null || !hasAdminRole(user.role)) {
+                sendJsonMessage(exchange, 403, "Forbidden");
+                return;
+            }
+            java.util.List<OptionProgress> progressList = listOptionProgress();
+            Integer selectedId = null;
+            String query = exchange.getRequestURI().getQuery();
+            if (query != null) {
+                for (String part : query.split("&")) {
+                    String[] kv = part.split("=", 2);
+                    if (kv.length == 2 && "optionId".equals(urlDecode(kv[0]))) {
+                        selectedId = parseNavOptionId(urlDecode(kv[1]));
+                    }
+                }
+            }
+            OptionProgress selected = null;
+            StringBuilder venues = new StringBuilder("[");
+            for (int i = 0; i < progressList.size(); i++) {
+                OptionProgress p = progressList.get(i);
+                if (i > 0) venues.append(',');
+                venues.append(venueProgressJson(p));
+                if (selectedId != null && p.option.id == selectedId) {
+                    selected = p;
+                }
+            }
+            venues.append(']');
+            if (selected == null && !progressList.isEmpty()) {
+                selected = progressList.get(0);
+            }
+            String selectedJson = selected == null ? "null" : venueProgressJson(selected);
+            sendJson(exchange, 200, "{\"venues\":" + venues + ",\"selected\":" + selectedJson + "}");
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to load status");
+        }
+    }
+
+    private static void apiStatusExport(HttpExchange exchange) throws IOException {
+        handleStatusExport(exchange);
+    }
+
+    private static void apiMapview(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            sendJsonMessage(exchange, 401, "Unauthorized");
+            return;
+        }
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null || !user.enabled) {
+                sendJsonMessage(exchange, 401, "Unauthorized");
+                return;
+            }
+            java.util.List<OptionProgress> progressList = listOptionProgress();
+            java.util.Map<Integer, Integer> markersPerCity = new java.util.HashMap<>();
+            java.util.List<double[]> placedPoints = new java.util.ArrayList<>();
+            StringBuilder markers = new StringBuilder("[");
+            StringBuilder venues = new StringBuilder("[");
+            boolean firstMarker = true;
+            boolean firstVenue = true;
+            for (OptionProgress progress : progressList) {
+                String color = progressColor(progress.overallPercent);
+                if (!firstVenue) venues.append(',');
+                firstVenue = false;
+                venues.append(venueProgressJson(progress));
+
+                int cityIndex = resolveCityIndex(progress.option.label);
+                if (cityIndex < 0) {
+                    continue;
+                }
+                int slot = markersPerCity.merge(cityIndex, 1, Integer::sum) - 1;
+                double[] xy = projectSaudiMap(CITY_COORDS[cityIndex][0], CITY_COORDS[cityIndex][1]);
+                xy = offsetMapPoint(xy[0], xy[1], slot);
+                for (int pass = 0; pass < 4; pass++) {
+                    boolean moved = false;
+                    for (double[] other : placedPoints) {
+                        double dx = xy[0] - other[0];
+                        double dy = xy[1] - other[1];
+                        double dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 46 && dist > 0.01) {
+                            double push = (46 - dist) / 2.0;
+                            xy[0] += (dx / dist) * push;
+                            xy[1] += (dy / dist) * push;
+                            moved = true;
+                        }
+                    }
+                    if (!moved) break;
+                }
+                placedPoints.add(new double[]{xy[0], xy[1]});
+                if (!firstMarker) markers.append(',');
+                firstMarker = false;
+                markers.append("{\"id\":").append(progress.option.id)
+                        .append(",\"label\":\"").append(jsonEscape(progress.option.label)).append("\"")
+                        .append(",\"x\":").append(String.format(Locale.US, "%.1f", xy[0]))
+                        .append(",\"y\":").append(String.format(Locale.US, "%.1f", xy[1]))
+                        .append(",\"percent\":").append(progress.overallPercent)
+                        .append(",\"color\":\"").append(jsonEscape(color)).append("\"}");
+            }
+            markers.append(']');
+            venues.append(']');
+            String viewBox = "0 0 " + ((int) MAP_WIDTH) + " " + ((int) MAP_HEIGHT);
+            sendJson(exchange, 200, "{"
+                    + "\"viewBox\":\"" + viewBox + "\","
+                    + "\"landPath\":\"" + jsonEscape(saudiOutlinePath()) + "\","
+                    + "\"markers\":" + markers + ","
+                    + "\"venues\":" + venues
+                    + "}");
+        } catch (SQLException ex) {
+            sendJsonMessage(exchange, 500, "Unable to load map view");
+        }
     }
 }
