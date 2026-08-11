@@ -383,7 +383,19 @@ public class App {
                 return;
             }
 
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, adminUser.firstName, "", listNavOptions(), null));
+            String query = exchange.getRequestURI().getQuery();
+            Map<String, String> q = parseQueryString(query);
+            Integer editId = null;
+            String editParam = q.get("edit");
+            if (editParam != null && !editParam.isBlank()) {
+                try {
+                    editId = Integer.parseInt(editParam.trim());
+                } catch (NumberFormatException ignored) {
+                    editId = null;
+                }
+            }
+
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, adminUser.firstName, "", listNavOptions(), null, editId));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the admin panel right now."));
         }
@@ -392,7 +404,9 @@ public class App {
     private static void handleAdminPanelPost(HttpExchange exchange, String username, String firstName) throws IOException {
         String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<String, String> formData = parseFormData(requestBody);
+        String action = formData.getOrDefault("action", "add").trim().toLowerCase();
         String label = formData.getOrDefault("label", "").trim();
+        String idParam = formData.getOrDefault("id", "").trim();
 
         java.util.List<NavOption> navOptions;
         try {
@@ -402,22 +416,101 @@ public class App {
             return;
         }
 
+        if ("delete".equals(action)) {
+            handleAdminPanelDelete(exchange, username, firstName, idParam, navOptions);
+            return;
+        }
+
+        if ("update".equals(action)) {
+            handleAdminPanelUpdate(exchange, username, firstName, idParam, label, navOptions);
+            return;
+        }
+
         try {
             if (label.isEmpty()) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option."));
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option.", null));
                 return;
             }
 
             saveNavOption(label);
             navOptions = listNavOptions();
-            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + label + "\" added successfully."));
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + label + "\" added successfully.", null));
         } catch (SQLException ex) {
             String message = ex.getMessage();
             if (message != null && message.contains("UNIQUE")) {
-                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists."));
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists.", null));
             } else {
-                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to add the navigation option. Please try again later."));
+                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to add the navigation option. Please try again later.", null));
             }
+        }
+    }
+
+    private static void handleAdminPanelDelete(HttpExchange exchange, String username, String firstName, String idParam, java.util.List<NavOption> navOptions) throws IOException {
+        Integer optionId = parseNavOptionId(idParam);
+        if (optionId == null) {
+            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, "", navOptions, "Invalid navigation option.", null));
+            return;
+        }
+
+        NavOption option = null;
+        try {
+            option = findNavOptionById(optionId);
+            if (option == null) {
+                sendHtmlResponse(exchange, 404, buildAdminPanelPage(username, firstName, "", listNavOptions(), "The navigation option was not found.", null));
+                return;
+            }
+            deleteNavOption(optionId);
+            resetUsersRoleByLabel(option.label);
+            navOptions = listNavOptions();
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", navOptions, "Navigation option \"" + option.label + "\" deleted.", null));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, "", navOptions, "Unable to delete the navigation option. Please try again later.", null));
+        }
+    }
+
+    private static void handleAdminPanelUpdate(HttpExchange exchange, String username, String firstName, String idParam, String label, java.util.List<NavOption> navOptions) throws IOException {
+        Integer optionId = parseNavOptionId(idParam);
+        if (optionId == null) {
+            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Invalid navigation option.", optionId));
+            return;
+        }
+
+        if (label.isEmpty()) {
+            sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option.", optionId));
+            return;
+        }
+
+        try {
+            NavOption existing = findNavOptionById(optionId);
+            if (existing == null) {
+                sendHtmlResponse(exchange, 404, buildAdminPanelPage(username, firstName, "", listNavOptions(), "The navigation option was not found.", null));
+                return;
+            }
+
+            if (!existing.label.equalsIgnoreCase(label)) {
+                updateNavOption(optionId, label);
+                updateUsersRoleByLabel(existing.label, label);
+            }
+
+            redirect(exchange, "/admin-panel");
+        } catch (SQLException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.contains("UNIQUE")) {
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "A navigation option with that name already exists.", optionId));
+            } else {
+                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, navOptions, "Unable to update the navigation option. Please try again later.", optionId));
+            }
+        }
+    }
+
+    private static Integer parseNavOptionId(String idParam) {
+        if (idParam == null || idParam.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(idParam.trim());
+        } catch (NumberFormatException ex) {
+            return null;
         }
     }
 
@@ -651,6 +744,44 @@ public class App {
              PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, label);
             stmt.setString(2, Instant.now().toString());
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void updateNavOption(int id, String label) throws SQLException {
+        String sql = "UPDATE nav_options SET label = ? WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
+            stmt.setInt(2, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void deleteNavOption(int id) throws SQLException {
+        String sql = "DELETE FROM nav_options WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void updateUsersRoleByLabel(String oldLabel, String newLabel) throws SQLException {
+        String sql = "UPDATE users SET role = ? WHERE role = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, newLabel);
+            stmt.setString(2, oldLabel);
+            stmt.executeUpdate();
+        }
+    }
+
+    private static void resetUsersRoleByLabel(String label) throws SQLException {
+        String sql = "UPDATE users SET role = 'user', is_admin = 0 WHERE role = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
             stmt.executeUpdate();
         }
     }
@@ -1309,17 +1440,35 @@ public class App {
                 "</div></main></div></body></html>";
     }
 
-    private static String buildAdminPanelPage(String username, String firstName, String labelValue, java.util.List<NavOption> navOptions, String message) {
+    private static String buildAdminPanelPage(String username, String firstName, String labelValue, java.util.List<NavOption> navOptions, String message, Integer editId) {
         String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;margin-top:1rem;font-weight:600;\">" + escapeHtml(message) + "</p>";
         StringBuilder existingOptions = new StringBuilder();
         if (navOptions.isEmpty()) {
             existingOptions.append("<p style=\"opacity:0.85;\">No custom navigation options yet.</p>");
         } else {
-            existingOptions.append("<ul style=\"margin:0;padding-left:1.25rem;\">");
+            existingOptions.append("<ul class=\"nav-option-list\">");
             for (NavOption option : navOptions) {
-                existingOptions.append("<li style=\"margin-bottom:0.35rem;\">")
-                        .append(escapeHtml(option.label))
-                        .append(" <span style=\"opacity:0.7;font-size:0.9rem;\">(visible in sidebar)</span></li>");
+                if (editId != null && editId == option.id) {
+                    existingOptions.append("<li class=\"nav-option-item\">")
+                            .append("<form class=\"nav-option-edit-form\" action=\"/admin-panel\" method=\"post\">")
+                            .append("<input type=\"hidden\" name=\"action\" value=\"update\"/>")
+                            .append("<input type=\"hidden\" name=\"id\" value=\"").append(option.id).append("\"/>")
+                            .append("<input name=\"label\" type=\"text\" value=\"").append(escapeHtml(option.label)).append("\" required/>")
+                            .append("<button type=\"submit\" class=\"btn-sm\">Save</button>")
+                            .append("<a class=\"btn-link\" href=\"/admin-panel\">Cancel</a>")
+                            .append("</form></li>");
+                } else {
+                    existingOptions.append("<li class=\"nav-option-item\">")
+                            .append("<span class=\"nav-option-label\">").append(escapeHtml(option.label)).append("</span>")
+                            .append("<span class=\"nav-option-actions\">")
+                            .append("<a class=\"button btn-sm\" href=\"/admin-panel?edit=").append(option.id).append("\">Edit</a>")
+                            .append("<form class=\"nav-option-delete-form\" action=\"/admin-panel\" method=\"post\">")
+                            .append("<input type=\"hidden\" name=\"action\" value=\"delete\"/>")
+                            .append("<input type=\"hidden\" name=\"id\" value=\"").append(option.id).append("\"/>")
+                            .append("<button type=\"submit\" class=\"btn-sm btn-danger\">Delete</button>")
+                            .append("</form>")
+                            .append("</span></li>");
+                }
             }
             existingOptions.append("</ul>");
         }
@@ -1336,6 +1485,18 @@ public class App {
                 " input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
                 " button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
                 " button:hover{background:#1d4ed8;}" +
+                " .nav-option-list{list-style:none;margin:0;padding:0;}" +
+                " .nav-option-item{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:0.75rem 0;border-bottom:1px solid rgba(255,255,255,0.08);}" +
+                " .nav-option-item:last-child{border-bottom:none;}" +
+                " .nav-option-label{font-weight:600;}" +
+                " .nav-option-actions{display:flex;gap:0.5rem;align-items:center;}" +
+                " .nav-option-edit-form,.nav-option-delete-form{display:flex;gap:0.5rem;align-items:center;margin:0;}" +
+                " .nav-option-edit-form input{flex:1;min-width:0;}" +
+                " .btn-sm{padding:0.45rem 0.75rem;font-size:0.85rem;}" +
+                " .btn-danger{background:#dc2626;}" +
+                " .btn-danger:hover{background:#b91c1c;}" +
+                " .btn-link{color:#cbd5e1;text-decoration:none;font-size:0.9rem;}" +
+                " .btn-link:hover{color:#fff;}" +
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(username, "admin", navOptions, "nav-item") + "<main class=\"main\">" +
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
@@ -1343,6 +1504,7 @@ public class App {
                 "<p style=\"margin:0;opacity:0.9;\">Add a new option to the left navigation. It will appear as a link for all logged-in users.</p>" +
                 feedback +
                 "<form action=\"/admin-panel\" method=\"post\">" +
+                "<input type=\"hidden\" name=\"action\" value=\"add\"/>" +
                 "<label for=\"label\">Navigation Option Name</label>" +
                 "<input id=\"label\" name=\"label\" type=\"text\" value=\"" + escapeHtml(labelValue) + "\" placeholder=\"Enter option name\" required/>" +
                 "<button type=\"submit\">Add Option</button>" +
