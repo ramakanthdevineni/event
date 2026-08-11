@@ -1227,22 +1227,18 @@ public class App {
                 "<th>Name</th><th>Email</th>" + statusHeader + "<th>Role</th>" + actionsHeader +
                 "</tr></thead><tbody>" + tableRows + "</tbody></table></div>";
 
-        String right;
-        if (editData == null) {
-            right = "<div class=\"placeholder\"><p>No user selected.</p>" +
-                    (currentIsAdmin ? "<p style=\"opacity:0.75;font-size:0.9rem;\">Select Edit on a user to update their profile.</p>" : "") +
-                    "</div>";
-        } else if (!currentIsAdmin) {
+        String editPanel = "";
+        if (editData != null && !currentIsAdmin) {
             String fn = escapeHtml(editData.getOrDefault("firstName", ""));
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
             String em = escapeHtml(editData.getOrDefault("email", ""));
             String roleVal = editData.getOrDefault("role", editData.getOrDefault("isAdmin", "0"));
             String displayRole = formatRoleDisplay(roleVal);
-            right = "<div class=\"read-only-details\"><h3 style=\"margin:0 0 1rem;\">" + fn + " " + ln + "</h3>" +
+            editPanel = "<div class=\"users-edit-panel read-only-details\"><h3>" + fn + " " + ln + "</h3>" +
                     "<p><strong>Email:</strong> " + em + "</p>" +
                     "<p><strong>Role:</strong> " + escapeHtml(displayRole) + "</p>" +
-                    "<p style=\"opacity:0.75;margin-top:1.5rem;\">You do not have permission to edit user profiles.</p></div>";
-        } else {
+                    "<p class=\"read-only-note\">You do not have permission to edit user profiles.</p></div>";
+        } else if (editData != null && currentIsAdmin) {
             String uname = escapeHtml(editData.getOrDefault("username", ""));
             String fn = escapeHtml(editData.getOrDefault("firstName", ""));
             String ln = escapeHtml(editData.getOrDefault("lastName", ""));
@@ -1251,10 +1247,10 @@ public class App {
             String roleSelected = roleVal == null || roleVal.isEmpty() ? "user" : roleVal;
             String roleControl = "<label for=\"role\">Role</label><select id=\"role\" name=\"role\">" +
                     buildRoleOptionsHtml(roleSelected, navOptions) + "</select>";
-            String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;font-weight:600;\">" + escapeHtml(message) + "</p>";
+            String formFeedback = message == null ? "" : "<p class=\"form-feedback\">" + escapeHtml(message) + "</p>";
 
-            right = "<form class=\"edit-form\" action=\"/users\" method=\"post\">" +
-                    "<h3 style=\"margin:0 0 1rem;\">Edit User</h3>" +
+            editPanel = "<div class=\"users-edit-panel\"><form class=\"edit-form\" action=\"/users\" method=\"post\">" +
+                    "<h3>Edit User</h3>" +
                     "<input type=\"hidden\" name=\"action\" value=\"update\"/>" +
                     "<input type=\"hidden\" name=\"username\" value=\"" + uname + "\"/>" +
                     "<label for=\"firstName\">First Name</label><input id=\"firstName\" name=\"firstName\" type=\"text\" value=\"" + fn + "\" required/>" +
@@ -1262,11 +1258,11 @@ public class App {
                     "<label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\" value=\"" + em + "\" required/>" +
                     roleControl +
                     "<div class=\"form-actions\"><button type=\"submit\">Save Changes</button><a href=\"/users\">Cancel</a></div>" +
-                    feedback +
-                    "</form>";
+                    formFeedback +
+                    "</form></div>";
         }
 
-        String feedback = message == null ? "" : "<div class=\"page-feedback\">" + escapeHtml(message) + "</div>";
+        String feedback = message == null || editData != null ? "" : "<div class=\"page-feedback\">" + escapeHtml(message) + "</div>";
 
         String headerHtml = "<div class=\"page-header\">" +
                 "<div class=\"page-header-text\"><h2>Welcome, " + escapeHtml(currentFirstName) + "</h2>" +
@@ -1297,12 +1293,14 @@ public class App {
                 ".users-list-toolbar{display:flex;justify-content:flex-end;margin-bottom:0.65rem;}" +
                 ".add-user-btn{padding:0.5rem 0.95rem;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;text-decoration:none;font-size:0.82rem;display:inline-flex;align-items:center;gap:0.45rem;transition:background 0.2s ease,transform 0.15s ease;}" +
                 ".add-user-btn:hover{background:#1d4ed8;transform:translateY(-1px);color:#fff;}" +
-                ".users-layout{display:flex;gap:2rem;align-items:flex-start;}" +
-                ".users-list{flex:2;min-width:0;}" +
+                ".users-content{width:100%;}" +
+                ".users-edit-panel{margin-bottom:1rem;padding:1.25rem 1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
+                ".users-edit-panel h3{margin:0 0 1rem;font-size:1.05rem;}" +
+                ".read-only-note{opacity:0.75;margin-top:1rem;font-size:0.85rem;}" +
+                ".form-feedback{color:#a5f3fc;font-weight:600;margin-top:0.5rem;}" +
                 ".user-search-bar{margin-bottom:1rem;}" +
                 ".user-search-bar input{width:100%;padding:0.65rem 0.85rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;font-size:0.85rem;box-sizing:border-box;}" +
                 ".user-search-bar input::placeholder{color:rgba(248,250,252,0.65);}" +
-                ".users-detail{flex:1;min-width:280px;padding:1.5rem;border-radius:16px;background:rgba(255,255,255,0.06);}" +
                 ".users-panel{border-radius:16px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 12px 30px rgba(15,23,42,0.2);}" +
                 ".users-table{width:100%;border-collapse:collapse;font-size:0.82rem;}" +
                 ".users-table th,.users-table td{padding:0.55rem 0.7rem;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);vertical-align:middle;}" +
@@ -1319,9 +1317,8 @@ public class App {
                 ".role-form select{font-size:0.78rem;padding:0.35rem 1.5rem 0.35rem 0.55rem;}" +
                 ".user-actions{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;}" +
                 ".user-action-form{display:inline;margin:0;}" +
-                ".placeholder{opacity:0.85;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
-                ".edit-form{display:grid;gap:0.75rem;}" +
+                ".edit-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;}" +
                 ".form-actions{display:flex;gap:0.75rem;align-items:center;margin-top:0.5rem;}" +
                 "label{font-size:0.95rem;opacity:0.9;}" +
                 "input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
@@ -1342,7 +1339,7 @@ public class App {
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentUserRole, navOptions, "user-item") + "<main class=\"main\">" +
                 headerHtml + feedback +
-                "<div class=\"users-layout\"><div class=\"users-list\">" + userListHtml + "</div><div class=\"users-detail\">" + right + "</div></div>" +
+                "<div class=\"users-content\">" + editPanel + userListHtml + "</div>" +
                 "</main></div>" +
                 "<script>" +
                 "document.getElementById('userSearch').addEventListener('input',function(e){" +
