@@ -3,9 +3,21 @@ package com.example;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+
+import com.lowagie.text.Document;
+import com.lowagie.text.DocumentException;
+import com.lowagie.text.Element;
+import com.lowagie.text.Font;
+import com.lowagie.text.FontFactory;
+import com.lowagie.text.Paragraph;
+import com.lowagie.text.Phrase;
+import com.lowagie.text.pdf.PdfPCell;
+import com.lowagie.text.pdf.PdfPTable;
+import com.lowagie.text.pdf.PdfWriter;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -66,6 +78,7 @@ public class App {
         server.createContext("/users", App::handleUsers);
         server.createContext("/add-user", App::handleAddUser);
         server.createContext("/admin-panel", App::handleAdminPanel);
+        server.createContext("/status/export", App::handleStatusExport);
         server.createContext("/status", App::handleStatus);
         server.createContext("/page", App::handleCustomPage);
         server.createContext("/change-password", App::handleChangePassword);
@@ -818,6 +831,116 @@ public class App {
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load status right now."));
         }
+    }
+
+    private static void handleStatusExport(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            if (!user.isAdmin) {
+                redirect(exchange, resolveHomePath(user, listNavOptions()));
+                return;
+            }
+
+            java.util.List<OptionProgress> progressList = listOptionProgress();
+            byte[] pdfBytes = buildStatusPdf(progressList);
+
+            exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+            exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"status-report.pdf\"");
+            exchange.sendResponseHeaders(200, pdfBytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(pdfBytes);
+            }
+        } catch (SQLException | DocumentException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to export status PDF right now."));
+        }
+    }
+
+    private static byte[] buildStatusPdf(java.util.List<OptionProgress> progressList) throws DocumentException, IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        Document document = new Document();
+        PdfWriter.getInstance(document, baos);
+        document.open();
+
+        Font titleFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 18);
+        Font headingFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 14);
+        Font normalFont = FontFactory.getFont(FontFactory.HELVETICA, 11);
+        Font tableHeaderFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 11);
+
+        document.add(new Paragraph("Status Report", titleFont));
+        document.add(new Paragraph("Generated: " + java.time.LocalDateTime.now().toString().replace('T', ' ').substring(0, 19), normalFont));
+        document.add(new Paragraph(" "));
+
+        document.add(new Paragraph("Overall Progress", headingFont));
+        document.add(new Paragraph(" "));
+
+        PdfPTable overviewTable = new PdfPTable(2);
+        overviewTable.setWidthPercentage(100);
+        overviewTable.setWidths(new float[]{3f, 2f});
+        overviewTable.addCell(pdfHeaderCell("Venue", tableHeaderFont));
+        overviewTable.addCell(pdfHeaderCell("Progress", tableHeaderFont));
+
+        if (progressList.isEmpty()) {
+            PdfPCell empty = new PdfPCell(new Phrase("No venues available.", normalFont));
+            empty.setColspan(2);
+            empty.setPadding(6);
+            overviewTable.addCell(empty);
+        } else {
+            for (OptionProgress progress : progressList) {
+                overviewTable.addCell(pdfBodyCell(progress.option.label, normalFont));
+                overviewTable.addCell(pdfBodyCell(progress.overallPercent + "% overall", normalFont));
+            }
+        }
+        document.add(overviewTable);
+        document.add(new Paragraph(" "));
+
+        for (OptionProgress progress : progressList) {
+            document.add(new Paragraph(progress.option.label + " — Overall progress: " + progress.overallPercent + "%", headingFont));
+            document.add(new Paragraph(" "));
+
+            PdfPTable detailTable = new PdfPTable(3);
+            detailTable.setWidthPercentage(100);
+            detailTable.setWidths(new float[]{3f, 2f, 2f});
+            detailTable.addCell(pdfHeaderCell("Work Item", tableHeaderFont));
+            detailTable.addCell(pdfHeaderCell("Status", tableHeaderFont));
+            detailTable.addCell(pdfHeaderCell("Progress", tableHeaderFont));
+
+            for (WorkItem item : progress.workItems) {
+                int pct = statusToPercent(item.status);
+                detailTable.addCell(pdfBodyCell(item.name, normalFont));
+                detailTable.addCell(pdfBodyCell(item.status, normalFont));
+                detailTable.addCell(pdfBodyCell(pct + "%", normalFont));
+            }
+            document.add(detailTable);
+            document.add(new Paragraph(" "));
+        }
+
+        document.close();
+        return baos.toByteArray();
+    }
+
+    private static PdfPCell pdfHeaderCell(String text, Font font) {
+        PdfPCell cell = new PdfPCell(new Phrase(text, font));
+        cell.setHorizontalAlignment(Element.ALIGN_LEFT);
+        cell.setPadding(6);
+        cell.setGrayFill(0.9f);
+        return cell;
+    }
+
+    private static PdfPCell pdfBodyCell(String text, Font font) {
+        PdfPCell cell = new PdfPCell(new Phrase(text == null ? "" : text, font));
+        cell.setHorizontalAlignment(Element.ALIGN_LEFT);
+        cell.setPadding(6);
+        return cell;
     }
 
     private static class WorkItemDef {
@@ -2440,7 +2563,7 @@ public class App {
         String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;margin-top:1rem;font-weight:600;\">" + escapeHtml(message) + "</p>";
         StringBuilder existingOptions = new StringBuilder();
         if (navOptions.isEmpty()) {
-            existingOptions.append("<p style=\"opacity:0.85;\">No custom navigation options yet.</p>");
+            existingOptions.append("<p style=\"opacity:0.85;\">No venues yet.</p>");
         } else {
             existingOptions.append("<ul class=\"nav-option-list\">");
             for (NavOption option : navOptions) {
@@ -2562,18 +2685,18 @@ public class App {
                 "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 feedback +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Admin Panel</h1>" +
-                "<p style=\"margin:0;opacity:0.9;\">Add a new option to the left navigation. It will appear as a link for all logged-in users.</p>" +
+                "<p style=\"margin:0;opacity:0.9;\">Add a new venue to the left navigation. It will appear as a link for all logged-in users.</p>" +
                 "<form action=\"/admin-panel\" method=\"post\">" +
                 "<input type=\"hidden\" name=\"action\" value=\"add\"/>" +
-                "<label for=\"label\">Navigation Option Name</label>" +
-                "<input id=\"label\" name=\"label\" type=\"text\" value=\"" + escapeHtml(labelValue) + "\" placeholder=\"Enter option name\" required/>" +
-                "<button type=\"submit\">Add Option</button>" +
+                "<label for=\"label\">Venue Name</label>" +
+                "<input id=\"label\" name=\"label\" type=\"text\" value=\"" + escapeHtml(labelValue) + "\" placeholder=\"Enter venue name\" required/>" +
+                "<button type=\"submit\">Add Venue</button>" +
                 "</form>" +
-                "<div style=\"margin-top:2rem;\"><h2 style=\"margin:0 0 0.75rem;font-size:1.1rem;\">Current Navigation Options</h2>" +
+                "<div style=\"margin-top:2rem;\"><h2 style=\"margin:0 0 0.75rem;font-size:1.1rem;\">Venue</h2>" +
                 existingOptions +
                 "</div></div>" +
                 "<div class=\"card\"><h2 style=\"margin:0 0 0.5rem;\">Work Items</h2>" +
-                "<p style=\"margin:0;opacity:0.9;\">These items appear on every option page. Add, rename, or remove them here.</p>" +
+                "<p style=\"margin:0;opacity:0.9;\">These items appear on every venue page. Add, rename, or remove them here.</p>" +
                 "<form class=\"inline-form\" action=\"/admin-panel\" method=\"post\">" +
                 "<input type=\"hidden\" name=\"action\" value=\"work-item-add\"/>" +
                 "<input name=\"name\" type=\"text\" placeholder=\"New work item name\" required/>" +
@@ -2595,7 +2718,7 @@ public class App {
     private static String buildStatusPage(String username, String firstName, java.util.List<NavOption> navOptions, java.util.List<OptionProgress> progressList, OptionProgress selected) {
         StringBuilder overviewRows = new StringBuilder();
         if (progressList.isEmpty()) {
-            overviewRows.append("<tr><td colspan=\"2\" class=\"empty-cell\">No options available yet. Add options in Admin Panel.</td></tr>");
+            overviewRows.append("<tr><td colspan=\"2\" class=\"empty-cell\">No venues available yet. Add venues in Admin Panel.</td></tr>");
         } else {
             for (OptionProgress progress : progressList) {
                 boolean isSelected = selected != null && selected.option.id == progress.option.id;
@@ -2612,7 +2735,7 @@ public class App {
 
         String detailHtml;
         if (selected == null) {
-            detailHtml = "<div class=\"status-detail-empty\"><p>Select an option to view individual progress.</p></div>";
+            detailHtml = "<div class=\"status-detail-empty\"><p>Select a venue to view individual progress.</p></div>";
         } else {
             StringBuilder detailRows = new StringBuilder();
             for (WorkItem item : selected.workItems) {
@@ -2654,10 +2777,10 @@ public class App {
                 " .empty-cell,.status-detail-empty{opacity:0.8;}" +
                 "</style></head><body>" +
                 "<div class=\"container\">" + buildSidebarHtml(username, "admin", navOptions, "nav-item") + "<main class=\"main\">" +
-                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/status/export\">Export to PDF</a><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"status-layout\">" +
                 "<div class=\"status-overview\"><h2>Overall Progress</h2>" +
-                "<table class=\"status-table\"><thead><tr><th>Option</th><th>Progress</th></tr></thead><tbody>" +
+                "<table class=\"status-table\"><thead><tr><th>Venue</th><th>Progress</th></tr></thead><tbody>" +
                 overviewRows +
                 "</tbody></table></div>" +
                 detailHtml +
