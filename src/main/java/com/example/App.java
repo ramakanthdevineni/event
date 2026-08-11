@@ -113,46 +113,81 @@ public class App {
             throw new SQLException("Unable to create data directory", ex);
         }
 
-        try (Connection connection = DriverManager.getConnection(DB_URL);
-             Statement statement = connection.createStatement()) {
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS users (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-                    "first_name TEXT NOT NULL, " +
-                    "last_name TEXT NOT NULL, " +
-                    "username TEXT NOT NULL UNIQUE, " +
-                    "email TEXT NOT NULL UNIQUE, " +
-                    "password TEXT NOT NULL, " +
-                    "is_admin INTEGER NOT NULL DEFAULT 0, " +
-                    "must_change_password INTEGER NOT NULL DEFAULT 0, " +
-                    "created_at TEXT NOT NULL)"
-            );
-            ensureUserTableColumns(connection);
-            // role column stores one or more roles as a comma-separated list (e.g. "user" or "Jeddah,Riyadh").
-            // Existing single-role values remain valid after upgrade.
-            addRoleColumnIfMissing(connection);
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_options (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-                    "label TEXT NOT NULL UNIQUE, " +
-                    "created_at TEXT NOT NULL)"
-            );
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sessions (" +
-                    "session_id TEXT PRIMARY KEY, " +
-                    "username TEXT NOT NULL, " +
-                    "last_activity_ms INTEGER NOT NULL)"
-            );
-            statement.execute("PRAGMA journal_mode=WAL");
-            statement.execute("PRAGMA busy_timeout=5000");
+        String service = System.getenv().getOrDefault("SERVICE_NAME", "all").trim().toLowerCase(Locale.ROOT);
+        runWithDbRetry(() -> {
+            try (Connection connection = openUsersDb();
+                 Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA journal_mode=WAL");
+                statement.executeUpdate("CREATE TABLE IF NOT EXISTS users (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "first_name TEXT NOT NULL, " +
+                        "last_name TEXT NOT NULL, " +
+                        "username TEXT NOT NULL UNIQUE, " +
+                        "email TEXT NOT NULL UNIQUE, " +
+                        "password TEXT NOT NULL, " +
+                        "is_admin INTEGER NOT NULL DEFAULT 0, " +
+                        "must_change_password INTEGER NOT NULL DEFAULT 0, " +
+                        "created_at TEXT NOT NULL)"
+                );
+                ensureUserTableColumns(connection);
+                // role column stores one or more roles as a comma-separated list (e.g. "user" or "Jeddah,Riyadh").
+                // Existing single-role values remain valid after upgrade.
+                addRoleColumnIfMissing(connection);
+                statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_options (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "label TEXT NOT NULL UNIQUE, " +
+                        "created_at TEXT NOT NULL)"
+                );
+                statement.executeUpdate("CREATE TABLE IF NOT EXISTS sessions (" +
+                        "session_id TEXT PRIMARY KEY, " +
+                        "username TEXT NOT NULL, " +
+                        "last_activity_ms INTEGER NOT NULL)"
+                );
+            }
+            initStatusDatabase();
+        });
+
+        // Only core (or monolithic "all") owns heavy seed/migration writes to avoid SQLite lock storms.
+        if (serves(service, "core")) {
+            runWithDbRetry(() -> {
+                ensureDefaultWorkItemsForAllNavOptions();
+                createDefaultAdminUser();
+                try (Connection connection = openUsersDb();
+                     Statement stmt = connection.createStatement()) {
+                    stmt.executeUpdate("UPDATE users SET role = 'admin' WHERE is_admin = 1");
+                } catch (SQLException ex) {
+                    // ignore migration failures
+                }
+            });
         }
-        initStatusDatabase();
-        ensureDefaultWorkItemsForAllNavOptions();
-        createDefaultAdminUser();
-        // ensure role column reflects existing is_admin flags
-        try (Connection connection = DriverManager.getConnection(DB_URL);
-             Statement stmt = connection.createStatement()) {
-            stmt.executeUpdate("UPDATE users SET role = 'admin' WHERE is_admin = 1");
-        } catch (SQLException ex) {
-            // ignore migration failures
+    }
+
+    @FunctionalInterface
+    private interface DbInitAction {
+        void run() throws SQLException;
+    }
+
+    private static void runWithDbRetry(DbInitAction action) throws SQLException {
+        SQLException last = null;
+        for (int attempt = 1; attempt <= 12; attempt++) {
+            try {
+                action.run();
+                return;
+            } catch (SQLException ex) {
+                last = ex;
+                String msg = ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(Locale.ROOT);
+                if (!msg.contains("busy") && !msg.contains("locked")) {
+                    throw ex;
+                }
+                try {
+                    Thread.sleep(250L * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ex;
+                }
+            }
         }
+        throw last;
     }
 
     private static void initStatusDatabase() throws SQLException {
@@ -2545,13 +2580,20 @@ public class App {
         }
     }
 
+    private static Connection openUsersDb() throws SQLException {
+        Connection connection = DriverManager.getConnection(DB_URL);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=5000");
+        }
+        return connection;
+    }
+
     private static String createSession(String username) {
         String sessionId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        try (Connection connection = openUsersDb();
              PreparedStatement statement = connection.prepareStatement(
                      "INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)")) {
-            statement.execute("PRAGMA busy_timeout=5000");
             statement.setString(1, sessionId);
             statement.setString(2, username);
             statement.setLong(3, now);
@@ -2563,7 +2605,7 @@ public class App {
     }
 
     private static void destroySession(String sessionId) {
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        try (Connection connection = openUsersDb();
              PreparedStatement statement = connection.prepareStatement("DELETE FROM sessions WHERE session_id = ?")) {
             statement.setString(1, sessionId);
             statement.executeUpdate();
@@ -2573,7 +2615,7 @@ public class App {
     }
 
     private static void destroySessionsForUser(String username) {
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        try (Connection connection = openUsersDb();
              PreparedStatement statement = connection.prepareStatement("DELETE FROM sessions WHERE username = ?")) {
             statement.setString(1, username);
             statement.executeUpdate();
@@ -2602,10 +2644,9 @@ public class App {
             return null;
         }
 
-        try (Connection connection = DriverManager.getConnection(DB_URL);
+        try (Connection connection = openUsersDb();
              PreparedStatement select = connection.prepareStatement(
                      "SELECT username, last_activity_ms FROM sessions WHERE session_id = ?")) {
-            select.execute("PRAGMA busy_timeout=5000");
             select.setString(1, sessionId);
             try (var rs = select.executeQuery()) {
                 if (!rs.next()) {
