@@ -637,8 +637,11 @@ public class App {
                 ".edit-form{display:grid;gap:0.75rem;}" +
                 ".form-actions{display:flex;gap:0.75rem;align-items:center;margin-top:0.5rem;}" +
                 "label{font-size:0.95rem;opacity:0.9;}" +
-                "input,select{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
-                "select:disabled{opacity:0.85;cursor:not-allowed;}" +
+                "input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
+                "select{padding:0.55rem 2rem 0.55rem 0.75rem;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:#1e293b;color:#f8fafc;font-size:0.95rem;cursor:pointer;appearance:auto;}" +
+                "select option{background:#fff;color:#0f172a;}" +
+                "select option:checked,select option:hover{background:#2563eb;color:#fff;}" +
+                "select:disabled{opacity:0.85;cursor:not-allowed;background:rgba(255,255,255,0.08);}" +
                 "button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
                 "button:hover{background:#1d4ed8;}" +
                 ".btn-sm{padding:0.45rem 0.75rem;font-size:0.85rem;}" +
