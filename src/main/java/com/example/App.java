@@ -1399,7 +1399,7 @@ public class App {
     }
 
     private static java.util.List<NavOption> listNavOptions() throws SQLException {
-        String sql = "SELECT id, label FROM nav_options ORDER BY created_at ASC";
+        String sql = "SELECT id, label FROM nav_options ORDER BY label COLLATE NOCASE ASC";
         var list = new java.util.ArrayList<NavOption>();
         try (Connection connection = DriverManager.getConnection(DB_URL);
              PreparedStatement stmt = connection.prepareStatement(sql);
@@ -2217,6 +2217,7 @@ public class App {
                 matched.add(option);
             }
         }
+        matched.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         return matched;
     }
 
@@ -2254,16 +2255,20 @@ public class App {
 
     private static String formatRoleDisplay(String role) {
         List<String> roles = normalizeRoles(parseRoles(role));
-        List<String> labels = new ArrayList<>();
+        List<String> system = new ArrayList<>();
+        List<String> venues = new ArrayList<>();
         for (String r : roles) {
             if ("user".equalsIgnoreCase(r)) {
-                labels.add("User");
+                system.add("User");
             } else if ("admin".equalsIgnoreCase(r)) {
-                labels.add("Admin");
+                system.add("Admin");
             } else {
-                labels.add(r);
+                venues.add(r);
             }
         }
+        venues.sort(String.CASE_INSENSITIVE_ORDER);
+        List<String> labels = new ArrayList<>(system);
+        labels.addAll(venues);
         return String.join(", ", labels);
     }
 
@@ -2717,21 +2722,34 @@ public class App {
                 "const toggle=dd.querySelector('.role-dropdown-toggle');" +
                 "if(panel){panel.hidden=true;}if(toggle){toggle.setAttribute('aria-expanded','false');}}" +
                 "});}" +
+                "let ignoreOutsideUntil=0;" +
+                "let lastWindowWidth=window.innerWidth;" +
+                "function isFinePointer(){try{return window.matchMedia('(hover:hover) and (pointer:fine)').matches;}catch(err){return true;}}" +
                 "document.querySelectorAll('[data-role-dropdown]').forEach(function(dropdown){" +
                 "const toggle=dropdown.querySelector('.role-dropdown-toggle');" +
                 "const panel=dropdown.querySelector('.role-dropdown-panel');" +
                 "const filter=dropdown.querySelector('.role-dropdown-search');" +
                 "if(!toggle||!panel){return;}" +
+                "function openDropdown(){" +
+                "closeAll(dropdown);" +
+                "dropdown.classList.add('open');" +
+                "panel.hidden=false;" +
+                "toggle.setAttribute('aria-expanded','true');" +
+                "ignoreOutsideUntil=Date.now()+500;" +
+                "positionPanel(dropdown,panel,toggle);" +
+                "if(filter&&isFinePointer()){filter.focus();filter.select();}" +
+                "}" +
+                "function closeDropdown(){" +
+                "dropdown.classList.remove('open');" +
+                "panel.hidden=true;" +
+                "toggle.setAttribute('aria-expanded','false');" +
+                "}" +
                 "toggle.addEventListener('click',function(e){" +
                 "e.preventDefault();e.stopPropagation();" +
-                "const willOpen=!dropdown.classList.contains('open');" +
-                "closeAll(dropdown);" +
-                "dropdown.classList.toggle('open',willOpen);" +
-                "panel.hidden=!willOpen;" +
-                "toggle.setAttribute('aria-expanded',willOpen?'true':'false');" +
-                "if(willOpen){positionPanel(dropdown,panel,toggle);if(filter){filter.focus();filter.select();}}" +
+                "if(dropdown.classList.contains('open')){closeDropdown();}else{openDropdown();}" +
                 "});" +
                 "panel.addEventListener('click',function(e){e.stopPropagation();});" +
+                "panel.addEventListener('touchstart',function(e){e.stopPropagation();},{passive:true});" +
                 "if(filter){filter.addEventListener('input',function(){" +
                 "const q=filter.value.trim().toLowerCase();" +
                 "dropdown.querySelectorAll('.role-check').forEach(function(label){" +
@@ -2740,11 +2758,23 @@ public class App {
                 "});});}" +
                 "dropdown.querySelectorAll('.role-check input[type=checkbox]').forEach(function(box){" +
                 "box.addEventListener('change',function(){updateSummary(dropdown);});" +
+                "box.addEventListener('click',function(e){e.stopPropagation();});" +
                 "});" +
                 "updateSummary(dropdown);" +
                 "});" +
-                "document.addEventListener('click',function(){closeAll(null);});" +
-                "window.addEventListener('resize',function(){closeAll(null);});" +
+                "document.addEventListener('click',function(e){" +
+                "if(Date.now()<ignoreOutsideUntil){return;}" +
+                "if(e.target&&e.target.closest&&e.target.closest('[data-role-dropdown]')){return;}" +
+                "closeAll(null);" +
+                "});" +
+                "document.addEventListener('touchend',function(e){" +
+                "if(Date.now()<ignoreOutsideUntil){return;}" +
+                "if(e.target&&e.target.closest&&e.target.closest('[data-role-dropdown]')){return;}" +
+                "closeAll(null);" +
+                "},{passive:true});" +
+                "window.addEventListener('resize',function(){" +
+                "if(window.innerWidth!==lastWindowWidth){lastWindowWidth=window.innerWidth;closeAll(null);}" +
+                "});" +
                 "const panelScroll=document.querySelector('.users-panel');" +
                 "if(panelScroll){panelScroll.addEventListener('scroll',function(){closeAll(null);},{passive:true});}" +
                 "})();" +
