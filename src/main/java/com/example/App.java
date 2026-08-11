@@ -45,6 +45,8 @@ public class App {
         server.createContext("/dashboard", App::handleDashboard);
         server.createContext("/users", App::handleUsers);
         server.createContext("/add-user", App::handleAddUser);
+        server.createContext("/admin-panel", App::handleAdminPanel);
+        server.createContext("/page", App::handleCustomPage);
         server.createContext("/change-password", App::handleChangePassword);
         server.createContext("/profile", App::handleProfile);
         server.createContext("/logout", App::handleLogout);
@@ -82,6 +84,11 @@ public class App {
             ensureUserTableColumns(connection);
             // add role column for clearer role semantics (admin/user)
             addRoleColumnIfMissing(connection);
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS nav_options (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "label TEXT NOT NULL UNIQUE, " +
+                    "created_at TEXT NOT NULL)"
+            );
         }
         createDefaultAdminUser();
         // ensure role column reflects existing is_admin flags
@@ -225,7 +232,7 @@ public class App {
                 redirect(exchange, "/change-password");
                 return;
             }
-            sendHtmlResponse(exchange, 200, buildDashboardPage(user.firstName, username, user.isAdmin));
+            sendHtmlResponse(exchange, 200, buildDashboardPage(user.firstName, username, user.isAdmin, listNavOptions()));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load your dashboard right now."));
         }
@@ -347,6 +354,105 @@ public class App {
         }
     }
 
+    private static void handleAdminPanel(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        try {
+            UserRecord adminUser = findUserByUsername(username);
+            if (adminUser == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            if (!adminUser.isAdmin) {
+                redirect(exchange, "/dashboard");
+                return;
+            }
+
+            if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                handleAdminPanelPost(exchange, username, adminUser.firstName);
+                return;
+            }
+
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, adminUser.firstName, "", listNavOptions(), null));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the admin panel right now."));
+        }
+    }
+
+    private static void handleAdminPanelPost(HttpExchange exchange, String username, String firstName) throws IOException {
+        String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Map<String, String> formData = parseFormData(requestBody);
+        String label = formData.getOrDefault("label", "").trim();
+
+        try {
+            java.util.List<NavOption> navOptions = listNavOptions();
+            if (label.isEmpty()) {
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, navOptions, "Please enter a name for the navigation option."));
+                return;
+            }
+
+            saveNavOption(label);
+            sendHtmlResponse(exchange, 200, buildAdminPanelPage(username, firstName, "", listNavOptions(), "Navigation option \"" + label + "\" added successfully."));
+        } catch (SQLException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.contains("UNIQUE")) {
+                sendHtmlResponse(exchange, 400, buildAdminPanelPage(username, firstName, label, listNavOptions(), "A navigation option with that name already exists."));
+            } else {
+                sendHtmlResponse(exchange, 500, buildAdminPanelPage(username, firstName, label, listNavOptions(), "Unable to add the navigation option. Please try again later."));
+            }
+        }
+    }
+
+    private static void handleCustomPage(HttpExchange exchange) throws IOException {
+        String username = getSessionUsername(exchange);
+        if (username == null) {
+            redirect(exchange, "/");
+            return;
+        }
+
+        try {
+            UserRecord user = findUserByUsername(username);
+            if (user == null) {
+                redirect(exchange, "/logout");
+                return;
+            }
+            if (user.mustChangePassword) {
+                redirect(exchange, "/change-password");
+                return;
+            }
+
+            String query = exchange.getRequestURI().getQuery();
+            Map<String, String> q = parseQueryString(query);
+            String idParam = q.get("id");
+            if (idParam == null || idParam.isBlank()) {
+                sendHtmlResponse(exchange, 400, buildErrorPage("Invalid page request."));
+                return;
+            }
+
+            int optionId;
+            try {
+                optionId = Integer.parseInt(idParam.trim());
+            } catch (NumberFormatException ex) {
+                sendHtmlResponse(exchange, 400, buildErrorPage("Invalid page request."));
+                return;
+            }
+
+            NavOption option = findNavOptionById(optionId);
+            if (option == null) {
+                sendHtmlResponse(exchange, 404, buildErrorPage("The requested page was not found."));
+                return;
+            }
+
+            sendHtmlResponse(exchange, 200, buildCustomPage(user.firstName, username, user.isAdmin, option, listNavOptions()));
+        } catch (SQLException ex) {
+            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load the page right now."));
+        }
+    }
+
     // --- Users list and edit UI/handlers ---
     private static void handleUsers(HttpExchange exchange) throws IOException {
         String currentUsername = getSessionUsername(exchange);
@@ -395,7 +501,7 @@ public class App {
                 }
             }
 
-            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, currentUsername, current.firstName, null));
+            sendHtmlResponse(exchange, 200, buildUsersPage(users, editData, current.isAdmin, currentUsername, current.firstName, null, listNavOptions()));
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to load users right now."));
         }
@@ -422,7 +528,7 @@ public class App {
                 String curUser = getSessionUsername(exchange);
                 String curFirst = "";
                 try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curUser, curFirst, "All fields are required."));
+                sendHtmlResponse(exchange, 400, buildUsersPage(users, form, true, curUser, curFirst, "All fields are required.", listNavOptions()));
             } catch (SQLException ex) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to update user."));
             }
@@ -441,7 +547,7 @@ public class App {
                 String curUser = getSessionUsername(exchange);
                 String curFirst = "";
                 try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, "No changes were applied."));
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, "No changes were applied.", listNavOptions()));
                 return;
             }
         } catch (SQLException ex) {
@@ -452,11 +558,98 @@ public class App {
                 String curUser = getSessionUsername(exchange);
                 String curFirst = "";
                 try { curFirst = findFirstNameByUsername(curUser); } catch (SQLException e) { curFirst = ""; }
-                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, feedback));
+                sendHtmlResponse(exchange, 500, buildUsersPage(users, form, true, curUser, curFirst, feedback, listNavOptions()));
             } catch (SQLException inner) {
                 sendHtmlResponse(exchange, 500, buildErrorPage("Unable to save changes."));
             }
         }
+    }
+
+    private static class NavOption {
+        final int id;
+        final String label;
+
+        NavOption(int id, String label) {
+            this.id = id;
+            this.label = label;
+        }
+    }
+
+    private static java.util.List<NavOption> listNavOptions() throws SQLException {
+        String sql = "SELECT id, label FROM nav_options ORDER BY created_at ASC";
+        var list = new java.util.ArrayList<NavOption>();
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql);
+             var rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                list.add(new NavOption(rs.getInt("id"), rs.getString("label")));
+            }
+        }
+        return list;
+    }
+
+    private static NavOption findNavOptionById(int id) throws SQLException {
+        String sql = "SELECT id, label FROM nav_options WHERE id = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setInt(1, id);
+            try (var rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new NavOption(rs.getInt("id"), rs.getString("label"));
+            }
+        }
+    }
+
+    private static void saveNavOption(String label) throws SQLException {
+        String sql = "INSERT INTO nav_options (label, created_at) VALUES (?, ?)";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, label);
+            stmt.setString(2, Instant.now().toString());
+            stmt.executeUpdate();
+        }
+    }
+
+    private static Map<String, String> parseQueryString(String query) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (query == null || query.isEmpty()) {
+            return result;
+        }
+        for (String part : query.split("&")) {
+            String[] kv = part.split("=", 2);
+            if (kv.length == 2) {
+                result.put(urlDecode(kv[0]), urlDecode(kv[1]));
+            }
+        }
+        return result;
+    }
+
+    private static String buildSidebarHtml(String username, boolean isAdmin, java.util.List<NavOption> navOptions, String navItemClass) {
+        StringBuilder nav = new StringBuilder();
+        nav.append("<a class=\"").append(navItemClass).append("\" href=\"/dashboard\">Dashboard</a>");
+        nav.append("<a class=\"").append(navItemClass).append("\" href=\"/users\">Users</a>");
+        if (isAdmin) {
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/admin-panel\">Admin Panel</a>");
+        }
+        for (NavOption option : navOptions) {
+            nav.append("<a class=\"").append(navItemClass).append("\" href=\"/page?id=").append(option.id).append("\">")
+                    .append(escapeHtml(option.label)).append("</a>");
+        }
+        return "<aside class=\"sidebar\"><h2>Navigation</h2><nav>" + nav + "</nav><hr/>" +
+                "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside>";
+    }
+
+    private static String sidebarLayoutStyles() {
+        return "body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
+                ".container{display:flex;min-height:100vh;}" +
+                ".sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);}" +
+                ".nav-item,.user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;}" +
+                ".nav-item:hover,.user-item:hover{background:rgba(255,255,255,0.03);}" +
+                ".main{flex:1;padding:2rem;}" +
+                "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
+                "a.button:hover{background:#1d4ed8;}";
     }
 
     private static class UserEntry {
@@ -513,7 +706,7 @@ public class App {
         }
     }
 
-    private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUsername, String currentFirstName, String message) {
+    private static String buildUsersPage(java.util.List<UserEntry> users, Map<String, String> editData, boolean currentIsAdmin, String currentUsername, String currentFirstName, String message, java.util.List<NavOption> navOptions) {
         String selectedUsername = editData == null ? null : editData.get("username");
 
         StringBuilder tableRows = new StringBuilder();
@@ -649,8 +842,7 @@ public class App {
                 "a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;display:inline-block;}" +
                 "a.button:hover{background:#1d4ed8;}" +
                 "</style></head><body>" +
-                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"user-item\" href=\"/dashboard\">Dashboard</a><a class=\"user-item\" href=\"/users\">Users</a></nav><hr/>" +
-                "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(currentUsername) + "</p></aside><main class=\"main\">" +
+                "<div class=\"container\">" + buildSidebarHtml(currentUsername, currentIsAdmin, navOptions, "user-item") + "<main class=\"main\">" +
                 headerHtml + feedback +
                 "<div class=\"users-layout\"><div class=\"users-list\">" + userListHtml + "</div><div class=\"users-detail\">" + right + "</div></div>" +
                 "</main></div></body></html>";
@@ -962,20 +1154,75 @@ public class App {
                 "<a href=\"/\">Return to home</a></main></body></html>";
     }
 
-    private static String buildDashboardPage(String firstName, String username, boolean isAdmin) {
-        String adminLink = "";
-
+    private static String buildDashboardPage(String firstName, String username, boolean isAdmin, java.util.List<NavOption> navOptions) {
         return "<!DOCTYPE html>" +
                 "<html lang=\"en\">" +
                 "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
                 "<title>Dashboard</title>" +
-                "<style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;} .container{display:flex;min-height:100vh;} .sidebar{width:260px;padding:1.5rem;background:rgba(255,255,255,0.04);border-right:1px solid rgba(255,255,255,0.04);} .nav-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;} .nav-item:hover{background:rgba(255,255,255,0.03);} .main{flex:1;padding:2rem;} .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;} .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);} a.button{padding:0.6rem 0.9rem;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:600;} a.button:hover{background:#1d4ed8;} </style></head><body>" +
-                "<div class=\"container\"><aside class=\"sidebar\"><h2>Navigation</h2><nav><a class=\"nav-item\" href=\"/users\">Users</a></nav><hr/>" +
-                "<p style=\"opacity:0.8;font-size:0.9rem;\">Logged in as " + escapeHtml(username) + "</p></aside><main class=\"main\">" +
-                "<div class=\"top-actions\">" + adminLink + "<a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<style>" + sidebarLayoutStyles() + " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;} .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);} </style></head><body>" +
+                "<div class=\"container\">" + buildSidebarHtml(username, isAdmin, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
                 "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Welcome, " + escapeHtml(firstName) + "</h1>" +
                 "<p style=\"margin:0;opacity:0.9;\">Your username is " + escapeHtml(username) + ".</p>" +
                 "</div></main></div></body></html>";
+    }
+
+    private static String buildAdminPanelPage(String username, String firstName, String labelValue, java.util.List<NavOption> navOptions, String message) {
+        String feedback = message == null ? "" : "<p style=\"color:#a5f3fc;margin-top:1rem;font-weight:600;\">" + escapeHtml(message) + "</p>";
+        StringBuilder existingOptions = new StringBuilder();
+        if (navOptions.isEmpty()) {
+            existingOptions.append("<p style=\"opacity:0.85;\">No custom navigation options yet.</p>");
+        } else {
+            existingOptions.append("<ul style=\"margin:0;padding-left:1.25rem;\">");
+            for (NavOption option : navOptions) {
+                existingOptions.append("<li style=\"margin-bottom:0.35rem;\">")
+                        .append(escapeHtml(option.label))
+                        .append(" <span style=\"opacity:0.7;font-size:0.9rem;\">(visible in sidebar)</span></li>");
+            }
+            existingOptions.append("</ul>");
+        }
+
+        return "<!DOCTYPE html>" +
+                "<html lang=\"en\">" +
+                "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>Admin Panel</title>" +
+                "<style>" + sidebarLayoutStyles() +
+                " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
+                " .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
+                " form{display:grid;gap:1rem;margin-top:1rem;}" +
+                " label{font-size:0.95rem;opacity:0.9;}" +
+                " input{padding:0.8rem;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#fff;}" +
+                " button{padding:0.7rem 1rem;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;}" +
+                " button:hover{background:#1d4ed8;}" +
+                "</style></head><body>" +
+                "<div class=\"container\">" + buildSidebarHtml(username, true, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"card\"><h1 style=\"margin:0 0 0.5rem;\">Admin Panel</h1>" +
+                "<p style=\"margin:0;opacity:0.9;\">Add a new option to the left navigation. It will appear as a link for all logged-in users.</p>" +
+                feedback +
+                "<form action=\"/admin-panel\" method=\"post\">" +
+                "<label for=\"label\">Navigation Option Name</label>" +
+                "<input id=\"label\" name=\"label\" type=\"text\" value=\"" + escapeHtml(labelValue) + "\" placeholder=\"Enter option name\" required/>" +
+                "<button type=\"submit\">Add Option</button>" +
+                "</form>" +
+                "<div style=\"margin-top:2rem;\"><h2 style=\"margin:0 0 0.75rem;font-size:1.1rem;\">Current Navigation Options</h2>" +
+                existingOptions +
+                "</div></div></main></div></body></html>";
+    }
+
+    private static String buildCustomPage(String firstName, String username, boolean isAdmin, NavOption option, java.util.List<NavOption> navOptions) {
+        return "<!DOCTYPE html>" +
+                "<html lang=\"en\">" +
+                "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>" + escapeHtml(option.label) + "</title>" +
+                "<style>" + sidebarLayoutStyles() +
+                " .top-actions{display:flex;justify-content:flex-end;gap:0.75rem;margin-bottom:1.5rem;}" +
+                " .card{max-width:720px;padding:2rem;border-radius:20px;background:rgba(255,255,255,0.06);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(6px);}" +
+                "</style></head><body>" +
+                "<div class=\"container\">" + buildSidebarHtml(username, isAdmin, navOptions, "nav-item") + "<main class=\"main\">" +
+                "<div class=\"top-actions\"><a class=\"button\" href=\"/profile\">Edit Profile</a><a class=\"button\" href=\"/logout\">Logout</a></div>" +
+                "<div class=\"card\"><h1 style=\"margin:0;\">Welcome to " + escapeHtml(option.label) + "</h1></div>" +
+                "</main></div></body></html>";
     }
 
     private static String buildProfilePage(String username, String firstName, String lastName, String email, String message) {
