@@ -29,7 +29,26 @@ public class App {
     private static final String DB_URL = "jdbc:sqlite:data/users.db";
     private static final String SESSION_COOKIE_NAME = "SESSIONID";
     private static final String DEFAULT_NEW_USER_PASSWORD = "Match123$";
-    private static final ConcurrentMap<String, String> sessions = new ConcurrentHashMap<>();
+    private static final long SESSION_TIMEOUT_MS = 5 * 60 * 1000L;
+    private static final ConcurrentMap<String, SessionInfo> sessions = new ConcurrentHashMap<>();
+
+    private static class SessionInfo {
+        final String username;
+        volatile long lastActivityMs;
+
+        SessionInfo(String username) {
+            this.username = username;
+            this.lastActivityMs = System.currentTimeMillis();
+        }
+
+        void touch() {
+            lastActivityMs = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - lastActivityMs > SESSION_TIMEOUT_MS;
+        }
+    }
 
     public static void main(String[] args) throws IOException {
         try {
@@ -194,16 +213,21 @@ public class App {
         String password = formData.getOrDefault("password", "").trim();
 
         if (username.isEmpty() || password.isEmpty()) {
-            sendHtmlResponse(exchange, 400, buildErrorPage("Please provide both username and password."));
+            sendHtmlResponse(exchange, 400, buildLoginErrorPage("Login failed", "Please provide both username and password."));
             return;
         }
 
         try {
+            if (!userExists(username)) {
+                sendHtmlResponse(exchange, 401, buildLoginErrorPage("Invalid User", ""));
+                return;
+            }
+
             UserRecord user = findUserByCredentials(username, password);
             if (user == null) {
-                sendHtmlResponse(exchange, 401, buildErrorPage("Invalid username or password. Please try again."));
+                sendHtmlResponse(exchange, 401, buildLoginErrorPage("Invalid Password", ""));
             } else if (!user.enabled) {
-                sendHtmlResponse(exchange, 403, buildErrorPage("This account has been disabled. Please contact an administrator."));
+                sendHtmlResponse(exchange, 403, buildLoginErrorPage("Account Disabled", "This account has been disabled. Please contact an administrator."));
             } else {
                 String sessionId = createSession(username);
                 exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=" + sessionId + "; Path=/; HttpOnly");
@@ -215,7 +239,7 @@ public class App {
                 }
             }
         } catch (SQLException ex) {
-            sendHtmlResponse(exchange, 500, buildErrorPage("Unable to verify credentials right now. Please try again later."));
+            sendHtmlResponse(exchange, 500, buildLoginErrorPage("Login failed", "Unable to verify credentials right now. Please try again later."));
         }
     }
 
@@ -739,7 +763,7 @@ public class App {
                 return;
             }
             deleteUser(username);
-            sessions.entrySet().removeIf(entry -> entry.getValue().equals(username));
+            sessions.entrySet().removeIf(entry -> entry.getValue().username.equals(username));
             redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" deleted.");
         } catch (SQLException ex) {
             sendHtmlResponse(exchange, 500, buildErrorPage("Unable to delete the user."));
@@ -765,7 +789,7 @@ public class App {
             boolean newEnabled = !target.enabled;
             setUserEnabled(username, newEnabled);
             if (!newEnabled) {
-                sessions.entrySet().removeIf(entry -> entry.getValue().equals(username));
+                sessions.entrySet().removeIf(entry -> entry.getValue().username.equals(username));
             }
             String statusLabel = newEnabled ? "enabled" : "disabled";
             redirectUsersNotice(exchange, "User \"" + target.firstName + " " + target.lastName + "\" " + statusLabel + ".");
@@ -1190,7 +1214,13 @@ public class App {
 
         String statusHeader = currentIsAdmin ? "<th>Status</th>" : "";
         String actionsHeader = currentIsAdmin ? "<th>Actions</th>" : "";
-        String userListHtml = "<div class=\"user-search-bar\">" +
+        String addUserBar = currentIsAdmin
+                ? "<div class=\"users-list-toolbar\"><a class=\"add-user-btn\" href=\"/add-user\">" +
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v14M5 12h14\"></path></svg>" +
+                "<span>Add User</span></a></div>"
+                : "";
+        String userListHtml = addUserBar +
+                "<div class=\"user-search-bar\">" +
                 "<input type=\"search\" id=\"userSearch\" placeholder=\"Search by name or email...\" aria-label=\"Search users by name or email\"/>" +
                 "</div>" +
                 "<div class=\"users-panel\"><table class=\"users-table\"><thead><tr>" +
@@ -1238,13 +1268,12 @@ public class App {
 
         String feedback = message == null ? "" : "<div class=\"page-feedback\">" + escapeHtml(message) + "</div>";
 
-        String headerHtml = "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;\">" +
-                "<div><h2 style=\"margin:0 0 0.25rem;\">Welcome, " + escapeHtml(currentFirstName) + "</h2><p style=\"margin:0;opacity:0.9;\">Signed in as " + escapeHtml(currentUsername) + "</p></div>" +
-                "<div style=\"display:flex;gap:0.75rem;align-items:center;\">" +
-                "<a class=\"button\" href=\"/profile\">Edit Profile</a>" +
-                "<a class=\"button\" href=\"/logout\">Logout</a>" +
-                (currentIsAdmin ? "<a class=\"button\" href=\"/add-user\">" +
-                        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"vertical-align:middle;\"><path d=\"M12 5v14M5 12h14\"></path></svg> <span style=\"margin-left:0.45rem;vertical-align:middle;\">Add User</span></a>" : "") +
+        String headerHtml = "<div class=\"page-header\">" +
+                "<div class=\"page-header-text\"><h2>Welcome, " + escapeHtml(currentFirstName) + "</h2>" +
+                "<p>Signed in as " + escapeHtml(currentUsername) + "</p></div>" +
+                "<div class=\"header-actions\">" +
+                "<a class=\"header-btn header-btn-profile\" href=\"/profile\">Edit Profile</a>" +
+                "<a class=\"header-btn header-btn-logout\" href=\"/logout\">Logout</a>" +
                 "</div></div>";
 
         return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
@@ -1255,6 +1284,19 @@ public class App {
                 ".user-item{display:block;padding:0.6rem;border-radius:10px;color:#e6eef8;text-decoration:none;margin-bottom:0.35rem;}" +
                 ".user-item:hover{background:rgba(255,255,255,0.03);}" +
                 ".main{flex:1;padding:2rem;}" +
+                ".page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;gap:1rem;}" +
+                ".page-header-text h2{margin:0 0 0.25rem;font-size:1.35rem;}" +
+                ".page-header-text p{margin:0;opacity:0.9;font-size:0.9rem;}" +
+                ".header-actions{display:flex;gap:0.65rem;align-items:center;flex-shrink:0;}" +
+                ".header-btn{padding:0.55rem 1rem;border-radius:10px;font-size:0.85rem;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;transition:background 0.2s ease,transform 0.15s ease;}" +
+                ".header-btn:hover{transform:translateY(-1px);}" +
+                ".header-btn-profile{background:rgba(255,255,255,0.12);color:#f8fafc;border:1px solid rgba(255,255,255,0.2);}" +
+                ".header-btn-profile:hover{background:rgba(255,255,255,0.2);color:#fff;}" +
+                ".header-btn-logout{background:#dc2626;color:#fff;border:1px solid rgba(255,255,255,0.1);}" +
+                ".header-btn-logout:hover{background:#b91c1c;color:#fff;}" +
+                ".users-list-toolbar{display:flex;justify-content:flex-end;margin-bottom:0.65rem;}" +
+                ".add-user-btn{padding:0.5rem 0.95rem;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;text-decoration:none;font-size:0.82rem;display:inline-flex;align-items:center;gap:0.45rem;transition:background 0.2s ease,transform 0.15s ease;}" +
+                ".add-user-btn:hover{background:#1d4ed8;transform:translateY(-1px);color:#fff;}" +
                 ".users-layout{display:flex;gap:2rem;align-items:flex-start;}" +
                 ".users-list{flex:2;min-width:0;}" +
                 ".user-search-bar{margin-bottom:1rem;}" +
@@ -1430,7 +1472,7 @@ public class App {
 
     private static String createSession(String username) {
         String sessionId = UUID.randomUUID().toString();
-        sessions.put(sessionId, username);
+        sessions.put(sessionId, new SessionInfo(username));
         return sessionId;
     }
 
@@ -1450,7 +1492,31 @@ public class App {
 
     private static String getSessionUsername(HttpExchange exchange) {
         String sessionId = getSessionIdFromCookie(exchange);
-        return sessionId != null ? sessions.get(sessionId) : null;
+        if (sessionId == null) {
+            return null;
+        }
+        SessionInfo session = sessions.get(sessionId);
+        if (session == null) {
+            return null;
+        }
+        if (session.isExpired()) {
+            sessions.remove(sessionId);
+            exchange.getResponseHeaders().add("Set-Cookie", SESSION_COOKIE_NAME + "=deleted; Path=/; Max-Age=0; HttpOnly");
+            return null;
+        }
+        session.touch();
+        return session.username;
+    }
+
+    private static boolean userExists(String username) throws SQLException {
+        String sql = "SELECT 1 FROM users WHERE username = ?";
+        try (Connection connection = DriverManager.getConnection(DB_URL);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, username);
+            try (var rs = statement.executeQuery()) {
+                return rs.next();
+            }
+        }
     }
 
     private static UserRecord findUserByUsername(String username) throws SQLException {
@@ -1788,6 +1854,22 @@ public class App {
                 "<div><label for=\"password\">New Password</label><input id=\"password\" name=\"password\" type=\"password\" required></div>" +
                 "<div><label for=\"confirmPassword\">Confirm Password</label><input id=\"confirmPassword\" name=\"confirmPassword\" type=\"password\" required></div>" +
                 "<button type=\"submit\">Set Password</button></form></main></body></html>";
+    }
+
+    private static String buildLoginErrorPage(String title, String message) {
+        String body = message == null || message.isEmpty()
+                ? ""
+                : "<p>" + escapeHtml(message) + "</p>";
+        return "<!DOCTYPE html>" +
+                "<html lang=\"en\">" +
+                "<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+                "<title>" + escapeHtml(title) + "</title>" +
+                "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#0f172a,#2563eb);color:#f8fafc;}" +
+                ".card{padding:3rem 2rem;border-radius:24px;background:rgba(255,255,255,0.14);box-shadow:0 20px 45px rgba(15,23,42,0.25);backdrop-filter:blur(10px);text-align:center;max-width:560px;margin:auto;}" +
+                "a{display:inline-block;margin-top:1.5rem;color:#cbd5e1;text-decoration:none;font-weight:600;}a:hover{color:#ffffff;}" +
+                "</style></head><body><main class=\"card\"><h1>" + escapeHtml(title) + "</h1>" +
+                body +
+                "<a href=\"/\">Back to login page</a></main></body></html>";
     }
 
     private static String buildErrorPage(String message) {
