@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#0f172a</color>
+    <color name="primary">#2563eb</color>
+    <color name="primary_dark">#0f172a</color>
+    <color name="white">#FFFFFF</color>
+    <string name="app_name">Event App</string>
+    <string name="connection_error">Cannot reach %1$s.\n\nMake sure your phone is on the same Wi‑Fi network and the server is running, then pull down to retry.</string>
+    <style name="Theme.EventApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="android:statusBarColor">@color/primary_dark</item>
+        <item name="android:navigationBarColor">@color/primary_dark</item>
+    </style>
+</resources>

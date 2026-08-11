@@ -1,0 +1,12 @@
+FROM mingc/android-build-box:latest
+
+WORKDIR /project
+COPY . .
+
+# Build a debug APK that can be sideloaded onto a phone.
+RUN chmod +x gradlew || true
+RUN if [ ! -f gradlew ]; then gradle wrapper --gradle-version 8.9; fi
+RUN ./gradlew assembleDebug --no-daemon
+
+# Copy APK to a known path for extraction
+RUN mkdir -p /out && cp app/build/outputs/apk/debug/*.apk /out/event-app-debug.apk

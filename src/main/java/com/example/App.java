@@ -2240,19 +2240,32 @@ public class App {
 
     private static String buildRoleCheckboxesHtml(String selectedRolesCsv, java.util.List<NavOption> navOptions, String idPrefix) {
         List<String> selected = normalizeRoles(parseRoles(selectedRolesCsv));
+        String safePrefix = escapeHtml(idPrefix);
+        String summary = selected.isEmpty() ? "Select roles..." : formatRoleDisplay(serializeRoles(selected));
+
         StringBuilder options = new StringBuilder();
         options.append(roleCheckbox("user", "User", selected, idPrefix));
         options.append(roleCheckbox("admin", "Admin", selected, idPrefix));
         for (NavOption option : navOptions) {
             options.append(roleCheckbox(option.label, option.label, selected, idPrefix));
         }
-        return "<div class=\"role-checks\">" + options + "</div>";
+
+        return "<div class=\"role-dropdown\" data-role-dropdown>" +
+                "<button type=\"button\" class=\"role-dropdown-toggle\" aria-expanded=\"false\">" +
+                "<span class=\"role-dropdown-summary\">" + escapeHtml(summary) + "</span>" +
+                "<span class=\"role-dropdown-caret\">&#9662;</span>" +
+                "</button>" +
+                "<div class=\"role-dropdown-panel\" hidden>" +
+                "<input type=\"search\" class=\"role-dropdown-search\" placeholder=\"Search roles...\" " +
+                "aria-label=\"Search roles\" autocomplete=\"off\"/>" +
+                "<div class=\"role-checks\" id=\"" + safePrefix + "-list\">" + options + "</div>" +
+                "</div></div>";
     }
 
     private static String roleCheckbox(String value, String label, List<String> selectedRoles, String idPrefix) {
         boolean checked = roleListContains(selectedRoles, value);
         String id = escapeHtml(idPrefix + "-" + value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-"));
-        return "<label class=\"role-check\" for=\"" + id + "\">" +
+        return "<label class=\"role-check\" for=\"" + id + "\" data-role-label=\"" + escapeHtml(label.toLowerCase(Locale.ROOT)) + "\">" +
                 "<input type=\"checkbox\" id=\"" + id + "\" name=\"role\" value=\"" + escapeHtml(value) + "\"" +
                 (checked ? " checked" : "") + "/>" +
                 "<span>" + escapeHtml(label) + "</span></label>";
@@ -2552,13 +2565,33 @@ public class App {
                 ".status-badge{display:inline-block;padding:0.2rem 0.55rem;border-radius:999px;font-size:0.72rem;font-weight:600;}" +
                 ".status-active{background:rgba(34,197,94,0.2);color:#86efac;}" +
                 ".status-disabled{background:rgba(239,68,68,0.2);color:#fca5a5;}" +
-                ".role-form{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:flex-start;margin:0;}" +
-                ".role-checks{display:flex;flex-wrap:wrap;gap:0.35rem 0.65rem;align-items:center;}" +
-                ".role-check{display:inline-flex;align-items:center;gap:0.3rem;font-size:0.75rem;opacity:0.95;cursor:pointer;}" +
+                ".role-form{display:flex;flex-direction:column;gap:0.4rem;align-items:stretch;margin:0;min-width:180px;}" +
+                ".role-dropdown{position:relative;width:100%;min-width:170px;}" +
+                ".role-dropdown-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:0.5rem;" +
+                "padding:0.45rem 0.65rem;border-radius:8px;border:1px solid rgba(255,255,255,0.22);background:#1e293b;color:#f8fafc;" +
+                "font-size:0.75rem;font-weight:500;cursor:pointer;text-align:left;}" +
+                ".role-dropdown-toggle:hover{background:#334155;}" +
+                ".role-dropdown.open .role-dropdown-toggle{border-color:#60a5fa;background:#1e3a5f;}" +
+                ".role-dropdown-summary{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+                ".role-dropdown-caret{opacity:0.8;font-size:0.7rem;}" +
+                ".role-dropdown-panel{position:absolute;z-index:40;top:calc(100% + 4px);left:0;right:0;min-width:220px;" +
+                "max-height:240px;overflow:auto;padding:0.55rem;border-radius:10px;border:1px solid rgba(255,255,255,0.18);" +
+                "background:#0f172a;box-shadow:0 12px 28px rgba(0,0,0,0.35);}" +
+                ".role-dropdown-search{width:100%;box-sizing:border-box;margin-bottom:0.45rem;padding:0.45rem 0.55rem;" +
+                "border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#fff;font-size:0.75rem;}" +
+                ".role-dropdown-search::placeholder{color:rgba(248,250,252,0.55);}" +
+                ".role-checks{display:flex;flex-direction:column;gap:0.25rem;}" +
+                ".role-check{display:flex;align-items:center;gap:0.4rem;font-size:0.75rem;opacity:0.95;cursor:pointer;" +
+                "padding:0.28rem 0.35rem;border-radius:6px;}" +
+                ".role-check:hover{background:rgba(255,255,255,0.06);}" +
                 ".role-check input{margin:0;accent-color:#2563eb;}" +
+                ".role-check.role-hidden{display:none;}" +
                 ".role-field{grid-column:1/-1;}" +
+                ".role-field .role-dropdown{max-width:360px;}" +
                 ".role-label{display:block;font-size:0.95rem;opacity:0.9;margin-bottom:0.4rem;}" +
                 ".role-display{font-size:0.78rem;}" +
+                ".users-edit-panel .role-dropdown-panel{position:static;margin-top:0.4rem;max-height:280px;}" +
+                ".users-edit-panel .role-dropdown.open .role-dropdown-panel{display:block;}" +
                 ".user-actions{display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;}" +
                 ".user-action-form{display:inline;margin:0;}" +
                 ".page-feedback{padding:0.5rem 0;color:#a5f3fc;font-weight:600;}" +
@@ -2586,13 +2619,57 @@ public class App {
                 "<div class=\"users-content\">" + editPanel + userListHtml + "</div>" +
                 "</main></div>" +
                 "<script>" +
-                "document.getElementById('userSearch').addEventListener('input',function(e){" +
+                "(function(){" +
+                "const search=document.getElementById('userSearch');" +
+                "if(search){search.addEventListener('input',function(e){" +
                 "const q=e.target.value.trim().toLowerCase();" +
                 "document.querySelectorAll('.users-table tbody tr').forEach(function(row){" +
                 "const name=(row.querySelector('.name-cell')?.textContent||'').toLowerCase();" +
                 "const email=(row.querySelector('.email-cell')?.textContent||'').toLowerCase();" +
                 "row.style.display=!q||name.includes(q)||email.includes(q)?'':'none';" +
-                "});});" +
+                "});});}" +
+                "function updateSummary(dropdown){" +
+                "const boxes=dropdown.querySelectorAll('.role-check input[type=checkbox]');" +
+                "const labels=[];" +
+                "boxes.forEach(function(box){if(box.checked){const span=box.parentElement.querySelector('span');labels.push(span?span.textContent:box.value);}});" +
+                "const summary=dropdown.querySelector('.role-dropdown-summary');" +
+                "if(summary){summary.textContent=labels.length?labels.join(', '):'Select roles...';}" +
+                "}" +
+                "function closeAll(except){" +
+                "document.querySelectorAll('.role-dropdown.open').forEach(function(dd){" +
+                "if(dd!==except){dd.classList.remove('open');" +
+                "const panel=dd.querySelector('.role-dropdown-panel');" +
+                "const toggle=dd.querySelector('.role-dropdown-toggle');" +
+                "if(panel){panel.hidden=true;}if(toggle){toggle.setAttribute('aria-expanded','false');}}" +
+                "});}" +
+                "document.querySelectorAll('[data-role-dropdown]').forEach(function(dropdown){" +
+                "const toggle=dropdown.querySelector('.role-dropdown-toggle');" +
+                "const panel=dropdown.querySelector('.role-dropdown-panel');" +
+                "const filter=dropdown.querySelector('.role-dropdown-search');" +
+                "if(!toggle||!panel){return;}" +
+                "toggle.addEventListener('click',function(e){" +
+                "e.preventDefault();e.stopPropagation();" +
+                "const willOpen=!dropdown.classList.contains('open');" +
+                "closeAll(dropdown);" +
+                "dropdown.classList.toggle('open',willOpen);" +
+                "panel.hidden=!willOpen;" +
+                "toggle.setAttribute('aria-expanded',willOpen?'true':'false');" +
+                "if(willOpen&&filter){filter.focus();}" +
+                "});" +
+                "panel.addEventListener('click',function(e){e.stopPropagation();});" +
+                "if(filter){filter.addEventListener('input',function(){" +
+                "const q=filter.value.trim().toLowerCase();" +
+                "dropdown.querySelectorAll('.role-check').forEach(function(label){" +
+                "const text=label.getAttribute('data-role-label')||'';" +
+                "label.classList.toggle('role-hidden',!!q&&!text.includes(q));" +
+                "});});}" +
+                "dropdown.querySelectorAll('.role-check input[type=checkbox]').forEach(function(box){" +
+                "box.addEventListener('change',function(){updateSummary(dropdown);});" +
+                "});" +
+                "updateSummary(dropdown);" +
+                "});" +
+                "document.addEventListener('click',function(){closeAll(null);});" +
+                "})();" +
                 "</script></body></html>";
     }
 
