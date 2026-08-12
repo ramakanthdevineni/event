@@ -127,22 +127,42 @@ public class DatabaseBootstrap {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         status.execute("""
-                CREATE TABLE IF NOT EXISTS status_change_logs (
+                CREATE TABLE IF NOT EXISTS activity_logs (
                   id BIGINT PRIMARY KEY AUTO_INCREMENT,
                   changed_at VARCHAR(64) NOT NULL,
                   changed_at_ms BIGINT NOT NULL,
+                  event_type VARCHAR(64) NOT NULL,
                   username VARCHAR(255) NOT NULL,
                   user_display_name VARCHAR(255) NOT NULL,
-                  venue_id BIGINT NOT NULL,
-                  venue_label VARCHAR(255) NOT NULL,
-                  item_name VARCHAR(255) NOT NULL,
-                  old_status VARCHAR(255) NOT NULL,
-                  new_status VARCHAR(255) NOT NULL,
-                  INDEX idx_status_logs_time (changed_at_ms),
-                  INDEX idx_status_logs_venue (venue_id),
-                  INDEX idx_status_logs_user (username)
+                  target VARCHAR(512) NOT NULL DEFAULT '',
+                  details VARCHAR(1024) NOT NULL DEFAULT '',
+                  venue_label VARCHAR(255) NOT NULL DEFAULT '',
+                  item_name VARCHAR(255) NOT NULL DEFAULT '',
+                  old_value VARCHAR(512) NOT NULL DEFAULT '',
+                  new_value VARCHAR(512) NOT NULL DEFAULT '',
+                  INDEX idx_activity_logs_time (changed_at_ms),
+                  INDEX idx_activity_logs_user (username),
+                  INDEX idx_activity_logs_type (event_type)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        migrateStatusChangeLogsToActivityLogs();
+    }
+
+    private void migrateStatusChangeLogsToActivityLogs() {
+        try {
+            Integer activityCount = status.queryForObject("SELECT COUNT(*) FROM activity_logs", Integer.class);
+            if (activityCount != null && activityCount > 0) return;
+            status.update("""
+                    INSERT INTO activity_logs(changed_at, changed_at_ms, event_type, username, user_display_name, target, details, venue_label, item_name, old_value, new_value)
+                    SELECT changed_at, changed_at_ms, 'VENUE_STATUS_CHANGE', username, user_display_name,
+                           CONCAT(venue_label, ' / ', item_name),
+                           CONCAT(old_status, ' → ', new_status),
+                           venue_label, item_name, old_status, new_status
+                    FROM status_change_logs
+                    """);
+        } catch (Exception ignored) {
+            // status_change_logs may not exist on fresh installs
+        }
     }
 
     private void seedDefaults() {

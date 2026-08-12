@@ -106,21 +106,29 @@ public class CoreApiController {
         }
     }
 
-    @GetMapping("/api/reports")
-    public ResponseEntity<?> reports(HttpServletRequest request) {
+    @GetMapping("/api/logs")
+    public ResponseEntity<?> logs(HttpServletRequest request,
+                                 @RequestParam(required = false) String user,
+                                 @RequestParam(required = false) String eventType,
+                                 @RequestParam(required = false) String from,
+                                 @RequestParam(required = false) String to) {
         try {
-            return ResponseEntity.ok(vms.listStatusChangeReports(requireUser(request)));
+            return ResponseEntity.ok(vms.listActivityLogs(requireUser(request), user, eventType, from, to));
         } catch (VmsService.ApiException ex) {
             return ResponseEntity.status(ex.status).body(Map.of("message", ex.getMessage()));
         }
     }
 
-    @GetMapping("/api/reports/export")
-    public ResponseEntity<byte[]> reportsExport(HttpServletRequest request) {
+    @GetMapping("/api/logs/export")
+    public ResponseEntity<byte[]> logsExport(HttpServletRequest request,
+                                             @RequestParam(required = false) String user,
+                                             @RequestParam(required = false) String eventType,
+                                             @RequestParam(required = false) String from,
+                                             @RequestParam(required = false) String to) {
         try {
-            byte[] pdf = vms.reportsPdf(requireUser(request));
+            byte[] pdf = vms.activityLogsPdf(requireUser(request), user, eventType, from, to);
             return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"status-change-report.pdf\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"activity-logs.pdf\"")
                     .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
                     .body(pdf);
         } catch (VmsService.ApiException ex) {

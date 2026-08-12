@@ -11,7 +11,7 @@ import { ProfilePage } from './pages/ProfilePage'
 import { StatusPage } from './pages/StatusPage'
 import { UsersPage } from './pages/UsersPage'
 import { VenuePage } from './pages/VenuePage'
-import { ReportsPage } from './pages/ReportsPage'
+import { LogsPage } from './pages/LogsPage'
 
 function HomeRedirect() {
   const { me, loading } = useAuth()
@@ -45,7 +45,8 @@ export default function App() {
         <Route path="/users/add" element={<AddUserPage />} />
         <Route path="/admin" element={<AdminPage />} />
         <Route path="/status" element={<StatusPage />} />
-        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/logs" element={<LogsPage />} />
+        <Route path="/reports" element={<Navigate to="/logs" replace />} />
         <Route path="/mapview" element={<MapviewPage />} />
         <Route path="/venues/:id" element={<VenuePage />} />
         <Route path="/profile" element={<ProfilePage />} />

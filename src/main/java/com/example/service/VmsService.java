@@ -11,6 +11,8 @@ import com.lowagie.text.Phrase;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.pdf.PdfWriter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -23,6 +25,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class VmsService {
+    private static final Logger log = LoggerFactory.getLogger(VmsService.class);
+
     private final JdbcTemplate users;
     private final JdbcTemplate status;
     private final AppProperties props;
@@ -99,6 +103,7 @@ public class VmsService {
         String sessionId = UUID.randomUUID().toString();
         users.update("INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)",
                 sessionId, username, System.currentTimeMillis());
+        logActivity(username, "USER_LOGIN", username, "User logged in");
         Map<String, Object> me = buildMe(username, u);
         me.put("_sessionId", sessionId);
         return me;
@@ -106,6 +111,10 @@ public class VmsService {
 
     public void logout(String sessionId) {
         if (sessionId != null) {
+            String username = resolveSessionUsername(sessionId);
+            if (username != null) {
+                logActivity(username, "USER_LOGOUT", username, "User logged out");
+            }
             users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
         }
     }
@@ -211,42 +220,69 @@ public class VmsService {
         status.update("UPDATE nav_work_items SET status=?, updated_at=? WHERE nav_option_id=? AND item_name=?",
                 newStatus, now, optionId, name);
         if (!oldStatus.equals(newStatus)) {
-            String display = (str(user.get("first_name")) + " " + str(user.get("last_name"))).trim();
-            if (display.isEmpty()) display = username;
-            status.update(
-                    "INSERT INTO status_change_logs(changed_at,changed_at_ms,username,user_display_name,venue_id,venue_label,item_name,old_status,new_status) VALUES (?,?,?,?,?,?,?,?,?)",
-                    now, nowMs, username, display, optionId, str(option.get("label")), name, oldStatus, newStatus);
+            logActivity(username, "VENUE_STATUS_CHANGE", str(option.get("label")) + " / " + name,
+                    oldStatus + " → " + newStatus, str(option.get("label")), name, oldStatus, newStatus);
         }
         invalidateProgress();
     }
 
-    public Map<String, Object> listStatusChangeReports(String username) {
+    public Map<String, Object> listActivityLogs(String username, String userFilter, String eventTypeFilter, String fromDate, String toDate) {
         requireReportAccess(username);
-        List<Map<String, Object>> rows = status.queryForList(
-                "SELECT id, changed_at, username, user_display_name, venue_id, venue_label, item_name, old_status, new_status " +
-                        "FROM status_change_logs ORDER BY changed_at_ms DESC LIMIT 500");
+        StringBuilder sql = new StringBuilder(
+                "SELECT id, changed_at, event_type, username, user_display_name, target, details, venue_label, item_name, old_value, new_value " +
+                        "FROM activity_logs WHERE 1=1");
+        List<Object> args = new ArrayList<>();
+        String uf = trim(userFilter);
+        if (!uf.isEmpty()) {
+            sql.append(" AND (LOWER(username) LIKE ? OR LOWER(user_display_name) LIKE ?)");
+            String like = "%" + uf.toLowerCase(Locale.ROOT) + "%";
+            args.add(like);
+            args.add(like);
+        }
+        String et = trim(eventTypeFilter);
+        if (!et.isEmpty()) {
+            if (!isValidEventType(et)) throw new ApiException(400, "Invalid event type filter.");
+            sql.append(" AND event_type = ?");
+            args.add(et);
+        }
+        Long fromMs = parseDateStartMs(fromDate);
+        if (fromMs != null) {
+            sql.append(" AND changed_at_ms >= ?");
+            args.add(fromMs);
+        }
+        Long toMs = parseDateEndMs(toDate);
+        if (toMs != null) {
+            sql.append(" AND changed_at_ms <= ?");
+            args.add(toMs);
+        }
+        sql.append(" ORDER BY changed_at_ms DESC LIMIT 1000");
+        List<Map<String, Object>> rows = status.queryForList(sql.toString(), args.toArray());
         List<Map<String, Object>> entries = new ArrayList<>();
         for (Map<String, Object> row : rows) {
+            String eventType = str(row.get("event_type"));
             Map<String, Object> e = new LinkedHashMap<>();
             e.put("id", ((Number) row.get("id")).longValue());
             e.put("changedAt", str(row.get("changed_at")));
             e.put("username", str(row.get("username")));
             e.put("userDisplayName", str(row.get("user_display_name")));
-            e.put("venueId", ((Number) row.get("venue_id")).longValue());
+            e.put("eventType", eventType);
+            e.put("eventLabel", eventLabel(eventType));
+            e.put("target", str(row.get("target")));
+            e.put("details", str(row.get("details")));
             e.put("venueLabel", str(row.get("venue_label")));
             e.put("itemName", str(row.get("item_name")));
-            e.put("oldStatus", str(row.get("old_status")));
-            e.put("newStatus", str(row.get("new_status")));
+            e.put("oldValue", str(row.get("old_value")));
+            e.put("newValue", str(row.get("new_value")));
             entries.add(e);
         }
         return Map.of("entries", entries);
     }
 
-    public byte[] reportsPdf(String username) {
+    public byte[] activityLogsPdf(String username, String userFilter, String eventTypeFilter, String fromDate, String toDate) {
         requireReportAccess(username);
         try {
             @SuppressWarnings("unchecked")
-            List<Map<String, Object>> entries = (List<Map<String, Object>>) listStatusChangeReports(username).get("entries");
+            List<Map<String, Object>> entries = (List<Map<String, Object>>) listActivityLogs(username, userFilter, eventTypeFilter, fromDate, toDate).get("entries");
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             Document doc = new Document();
             PdfWriter.getInstance(doc, baos);
@@ -254,33 +290,107 @@ public class VmsService {
             Font title = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 14);
             Font header = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 9);
             Font body = FontFactory.getFont(FontFactory.HELVETICA, 8);
-            doc.add(new Paragraph("VMS Status Change Report", title));
+            doc.add(new Paragraph("VMS Activity Logs", title));
             doc.add(new Paragraph("Generated: " + Instant.now(), body));
             doc.add(new Paragraph(" "));
-            PdfPTable table = new PdfPTable(new float[]{2.2f, 1.8f, 1.6f, 1.6f, 1.6f, 1.6f});
+            PdfPTable table = new PdfPTable(new float[]{2f, 1.6f, 1.4f, 2f, 2.2f});
             table.setWidthPercentage(100);
-            for (String h : List.of("When", "User", "Venue", "Work Item", "From", "To")) {
-                PdfPCell cell = new PdfPCell(new Phrase(h, header));
-                table.addCell(cell);
+            for (String h : List.of("When", "User", "Event", "Target", "Details")) {
+                table.addCell(new PdfPCell(new Phrase(h, header)));
             }
             for (Map<String, Object> e : entries) {
                 table.addCell(new PdfPCell(new Phrase(str(e.get("changedAt")), body)));
                 table.addCell(new PdfPCell(new Phrase(str(e.get("userDisplayName")) + " (" + str(e.get("username")) + ")", body)));
-                table.addCell(new PdfPCell(new Phrase(str(e.get("venueLabel")), body)));
-                table.addCell(new PdfPCell(new Phrase(str(e.get("itemName")), body)));
-                table.addCell(new PdfPCell(new Phrase(str(e.get("oldStatus")), body)));
-                table.addCell(new PdfPCell(new Phrase(str(e.get("newStatus")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("eventLabel")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("target")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("details")), body)));
             }
             if (entries.isEmpty()) {
-                PdfPCell empty = new PdfPCell(new Phrase("No status changes recorded yet.", body));
-                empty.setColspan(6);
+                PdfPCell empty = new PdfPCell(new Phrase("No log entries found.", body));
+                empty.setColspan(5);
                 table.addCell(empty);
             }
             doc.add(table);
             doc.close();
             return baos.toByteArray();
         } catch (Exception ex) {
-            throw new ApiException(500, "Unable to export reports PDF right now.");
+            throw new ApiException(500, "Unable to export logs PDF right now.");
+        }
+    }
+
+    private void logActivity(String actorUsername, String eventType, String target, String details) {
+        logActivity(actorUsername, eventType, target, details, "", "", "", "");
+    }
+
+    private void logActivity(String actorUsername, String eventType, String target, String details,
+                             String venueLabel, String itemName, String oldValue, String newValue) {
+        try {
+            String display = displayNameFor(actorUsername);
+            String now = Instant.now().toString();
+            long nowMs = System.currentTimeMillis();
+            status.update(
+                    "INSERT INTO activity_logs(changed_at,changed_at_ms,event_type,username,user_display_name,target,details,venue_label,item_name,old_value,new_value) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    now, nowMs, eventType, actorUsername, display, target, details, venueLabel, itemName, oldValue, newValue);
+        } catch (Exception ex) {
+            log.warn("Failed to write activity log [{}] for {}: {}", eventType, actorUsername, ex.getMessage());
+        }
+    }
+
+    private String displayNameFor(String username) {
+        try {
+            Map<String, Object> u = findUserRow(username);
+            String display = (str(u.get("first_name")) + " " + str(u.get("last_name"))).trim();
+            return display.isEmpty() ? username : display;
+        } catch (Exception ex) {
+            return username;
+        }
+    }
+
+    private static String eventLabel(String eventType) {
+        return switch (eventType) {
+            case "VENUE_STATUS_CHANGE" -> "Venue status changed";
+            case "USER_CREATED" -> "User created";
+            case "USER_DELETED" -> "User deleted";
+            case "USER_ENABLED" -> "User enabled";
+            case "USER_DISABLED" -> "User disabled";
+            case "USER_LOGIN" -> "User logged in";
+            case "USER_LOGOUT" -> "User logged out";
+            case "VENUE_CREATED" -> "Venue created";
+            case "WORK_ITEM_CREATED" -> "Work item created";
+            default -> eventType;
+        };
+    }
+
+    private static boolean isValidEventType(String eventType) {
+        return switch (eventType) {
+            case "VENUE_STATUS_CHANGE", "USER_CREATED", "USER_DELETED", "USER_ENABLED", "USER_DISABLED",
+                 "USER_LOGIN", "USER_LOGOUT", "VENUE_CREATED", "WORK_ITEM_CREATED" -> true;
+            default -> false;
+        };
+    }
+
+    private static Long parseDateStartMs(String date) {
+        if (date == null || date.isBlank()) return null;
+        try {
+            return java.time.LocalDate.parse(date.trim())
+                    .atStartOfDay(java.time.ZoneOffset.UTC)
+                    .toInstant()
+                    .toEpochMilli();
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private static Long parseDateEndMs(String date) {
+        if (date == null || date.isBlank()) return null;
+        try {
+            return java.time.LocalDate.parse(date.trim())
+                    .plusDays(1)
+                    .atStartOfDay(java.time.ZoneOffset.UTC)
+                    .toInstant()
+                    .toEpochMilli() - 1;
+        } catch (Exception ex) {
+            return null;
         }
     }
 
@@ -332,6 +442,8 @@ public class VmsService {
         } catch (Exception ex) {
             throw new ApiException(400, "A user with that email already exists.");
         }
+        logActivity(currentUsername, "USER_CREATED", newUsername,
+                "Created user " + firstName + " " + lastName + " (" + email + ")");
         return Map.of("message", "User created. Email is the username and default password is "
                 + props.getDefaultNewUserPassword() + ".");
     }
@@ -347,6 +459,7 @@ public class VmsService {
             case "delete" -> {
                 if (target.equals(currentUsername)) throw new ApiException(400, "You cannot delete your own account.");
                 if (props.getDefaultAdminUsername().equals(target)) throw new ApiException(400, "The default admin account cannot be deleted.");
+                logActivity(currentUsername, "USER_DELETED", target, "Deleted user " + target);
                 users.update("DELETE FROM users WHERE username=?", target);
                 users.update("DELETE FROM sessions WHERE username=?", target);
                 return Map.of("message", "User deleted");
@@ -358,6 +471,8 @@ public class VmsService {
                 boolean enabled = ((Number) t.get("is_enabled")).intValue() == 1;
                 users.update("UPDATE users SET is_enabled=? WHERE username=?", enabled ? 0 : 1, target);
                 if (enabled) users.update("DELETE FROM sessions WHERE username=?", target);
+                logActivity(currentUsername, enabled ? "USER_DISABLED" : "USER_ENABLED", target,
+                        enabled ? "Disabled user " + target : "Enabled user " + target);
                 return Map.of("message", "User status updated");
             }
             case "update-role" -> {
@@ -401,6 +516,7 @@ public class VmsService {
                 users.update("INSERT INTO nav_options(label, created_at) VALUES (?,?)", label, Instant.now().toString());
                 Integer id = users.queryForObject("SELECT id FROM nav_options WHERE label=?", Integer.class, label);
                 if (id != null) ensureWorkItems(id, label);
+                logActivity(username, "VENUE_CREATED", label, "Created venue " + label);
                 invalidateProgress();
                 yield Map.of("message", "Venue added");
             }
@@ -429,6 +545,7 @@ public class VmsService {
                 int sort = nextSort("work_item_defs");
                 status.update("INSERT INTO work_item_defs(name, sort_order) VALUES (?,?)", name, sort);
                 seedWorkItem(name);
+                logActivity(username, "WORK_ITEM_CREATED", name, "Created work item " + name, "", name, "", "");
                 invalidateDefs();
                 yield Map.of("message", "Work item added");
             }
@@ -612,7 +729,7 @@ public class VmsService {
             addNav(nav, "Users", "/users");
             addNav(nav, "Admin Panel", "/admin");
             addNav(nav, "Status", "/status");
-            addNav(nav, "Reports", "/reports");
+            addNav(nav, "Logs", "/logs");
             addNav(nav, "Mapview", "/mapview");
             for (Map<String, Object> v : venues) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
         } else {
@@ -620,7 +737,7 @@ public class VmsService {
             if (hasUser(role) || matched.isEmpty()) {
                 addNav(nav, "Dashboard", "/dashboard");
                 addNav(nav, "Users", "/users");
-                addNav(nav, "Reports", "/reports");
+                addNav(nav, "Logs", "/logs");
                 addNav(nav, "Mapview", "/mapview");
             } else {
                 addNav(nav, "Mapview", "/mapview");
