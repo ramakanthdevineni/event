@@ -23,6 +23,8 @@ services:
       MYSQL_USER: ${DB_USERNAME:-vms}
       MYSQL_PASSWORD: ${DB_PASSWORD:-vms}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-vms-root-change-me}
+    ports:
+      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
