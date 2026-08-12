@@ -12,6 +12,7 @@ export function UsersPage() {
   const [data, setData] = useState<UsersPayload | null>(null)
   const [q, setQ] = useState('')
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [editUser, setEditUser] = useState<UserRow | null>(null)
   const [roleDrafts, setRoleDrafts] = useState<Record<string, string[]>>({})
   const [editForm, setEditForm] = useState({ firstName: '', lastName: '', email: '', roles: [] as string[] })
@@ -47,9 +48,15 @@ export function UsersPage() {
 
   async function saveRoles(username: string) {
     setError('')
+    setSuccess('')
     try {
-      await api.put('/api/users', { action: 'update-role', username, roles: roleDrafts[username] || [] })
+      const roles = roleDrafts[username] || []
+      await api.put('/api/users', { action: 'update-role', username, roles })
       await load()
+      const label = roles.length ? roles.join(', ') : '(none)'
+      const msg = `Roles updated for ${username}: ${label}`
+      setSuccess(msg)
+      window.alert(msg)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unable to save roles')
     }
@@ -57,9 +64,11 @@ export function UsersPage() {
 
   async function toggleEnabled(username: string) {
     setError('')
+    setSuccess('')
     try {
       await api.put('/api/users', { action: 'toggle-enabled', username })
       await load()
+      setSuccess(`User status updated for ${username}.`)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unable to update user status')
     }
@@ -67,14 +76,18 @@ export function UsersPage() {
 
   async function removeUser(username: string) {
     if (!confirm(`Delete user ${username}?`)) return
+    setError('')
+    setSuccess('')
     await api.put('/api/users', { action: 'delete', username })
     await load()
+    setSuccess(`User ${username} deleted.`)
   }
 
   async function saveEdit(e: FormEvent) {
     e.preventDefault()
     if (!editUser) return
     setError('')
+    setSuccess('')
     try {
       await api.put('/api/users', {
         action: 'update',
@@ -84,8 +97,12 @@ export function UsersPage() {
         email: editForm.email,
         roles: editForm.roles,
       })
+      const name = editUser.username
       setEditUser(null)
       await load()
+      const msg = `User ${name} updated successfully.`
+      setSuccess(msg)
+      window.alert(msg)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unable to update user')
     }
@@ -133,6 +150,7 @@ export function UsersPage() {
       />
 
       {error && <p className="error">{error}</p>}
+      {success && <p className="success">{success}</p>}
 
       <div className="card table-wrap" style={{ padding: 0 }}>
         <table className="data">
