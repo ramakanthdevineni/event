@@ -1,12 +1,63 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from './auth'
+import type { NavItem } from './types'
+
+function NavVenueDropdown({ venues, onNavigate }: { venues: NavItem[]; onNavigate: () => void }) {
+  const location = useLocation()
+  const activeVenue = venues.find((v) => location.pathname === v.href)
+  const [open, setOpen] = useState(() => Boolean(activeVenue))
+
+  useEffect(() => {
+    if (activeVenue) setOpen(true)
+  }, [activeVenue?.href])
+
+  return (
+    <div className={`nav-venue-group${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className={`nav-venue-toggle${activeVenue ? ' active' : ''}`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>{activeVenue ? activeVenue.label : 'Venues'}</span>
+        <span className="nav-venue-caret" aria-hidden>{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="nav-venue-panel">
+          {venues.map((item) => (
+            <NavLink
+              key={item.href}
+              to={item.href}
+              className={({ isActive }) => `nav-link nav-venue-link${isActive ? ' active' : ''}`}
+              onClick={onNavigate}
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function AppLayout() {
   const { me, logout } = useAuth()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const sideRef = useRef<HTMLElement>(null)
+
+  const { mainNav, venueNav } = useMemo(() => {
+    if (!me) return { mainNav: [] as NavItem[], venueNav: [] as NavItem[] }
+    if (!me.isAdmin) return { mainNav: me.nav, venueNav: [] as NavItem[] }
+    const main: NavItem[] = []
+    const venues: NavItem[] = []
+    for (const item of me.nav) {
+      if (item.href.startsWith('/venues/')) venues.push(item)
+      else main.push(item)
+    }
+    return { mainNav: main, venueNav: venues }
+  }, [me])
 
   useEffect(() => {
     const onDoc = (e: MouseEvent | TouchEvent) => {
@@ -31,7 +82,7 @@ export function AppLayout() {
         <div className="sidebar-panel">
           <h2>Navigation</h2>
           <nav>
-            {me.nav.map((item) => (
+            {mainNav.map((item) => (
               <NavLink
                 key={item.href}
                 to={item.href}
@@ -41,6 +92,9 @@ export function AppLayout() {
                 {item.label}
               </NavLink>
             ))}
+            {me.isAdmin && venueNav.length > 0 && (
+              <NavVenueDropdown venues={venueNav} onNavigate={() => setOpen(false)} />
+            )}
           </nav>
           <hr style={{ borderColor: 'rgba(255,255,255,0.1)' }} />
           <p className="sidebar-user">Logged in as {me.username}</p>
