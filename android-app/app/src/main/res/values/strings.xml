@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Event App</string>
+    <string name="app_name">VMS</string>
     <string name="connection_error">Cannot reach %1$s.\n\nMake sure your phone is on the same Wi‑Fi network and the server is running, then pull down to retry.</string>
 </resources>
