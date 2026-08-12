@@ -2,6 +2,7 @@ package com.example.service;
 
 import com.example.config.AppProperties;
 import com.example.map.SaudiMapGeometry;
+import com.example.security.PasswordService;
 import com.lowagie.text.Document;
 import com.lowagie.text.Font;
 import com.lowagie.text.FontFactory;
@@ -25,6 +26,7 @@ public class VmsService {
     private final JdbcTemplate users;
     private final JdbcTemplate status;
     private final AppProperties props;
+    private final PasswordService passwords;
 
     private final Object progressLock = new Object();
     private volatile List<Map<String, Object>> progressCache;
@@ -37,10 +39,12 @@ public class VmsService {
 
     public VmsService(@Qualifier("usersJdbc") JdbcTemplate users,
                       @Qualifier("statusJdbc") JdbcTemplate status,
-                      AppProperties props) {
+                      AppProperties props,
+                      PasswordService passwords) {
         this.users = users;
         this.status = status;
         this.props = props;
+        this.passwords = passwords;
     }
 
     public static class ApiException extends RuntimeException {
@@ -75,15 +79,22 @@ public class VmsService {
         if (username.isEmpty() || password.isEmpty()) {
             throw new ApiException(400, "Please provide both username and password.");
         }
-        Integer exists = users.query("SELECT 1 FROM users WHERE username = ?", rs -> rs.next() ? 1 : null, username);
-        if (exists == null) throw new ApiException(401, "Invalid User");
         List<Map<String, Object>> rows = users.queryForList(
-                "SELECT first_name, last_name, email, is_admin, must_change_password, role, is_enabled FROM users WHERE username = ? AND password = ?",
-                username, password);
-        if (rows.isEmpty()) throw new ApiException(401, "Invalid Password");
+                "SELECT first_name, last_name, email, is_admin, must_change_password, role, is_enabled, password FROM users WHERE username = ?",
+                username);
+        if (rows.isEmpty()) {
+            throw new ApiException(401, "Invalid username or password.");
+        }
         Map<String, Object> u = rows.get(0);
+        String stored = str(u.get("password"));
+        if (!passwords.matches(password, stored)) {
+            throw new ApiException(401, "Invalid username or password.");
+        }
         if (((Number) u.get("is_enabled")).intValue() != 1) {
             throw new ApiException(403, "This account has been disabled. Please contact an administrator.");
+        }
+        if (!passwords.isHashed(stored)) {
+            users.update("UPDATE users SET password=? WHERE username=?", passwords.hash(password), username);
         }
         String sessionId = UUID.randomUUID().toString();
         users.update("INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)",
@@ -125,7 +136,7 @@ public class VmsService {
                         firstName, lastName, email, username);
             } else {
                 users.update("UPDATE users SET first_name=?, last_name=?, email=?, password=? WHERE username=?",
-                        firstName, lastName, email, password, username);
+                        firstName, lastName, email, passwords.hash(password), username);
             }
         } catch (DuplicateKeyException ex) {
             throw new ApiException(400, "The email address is already in use.");
@@ -145,7 +156,8 @@ public class VmsService {
         if (!password.equals(confirm)) {
             throw new ApiException(400, "Passwords do not match. Please re-enter them.");
         }
-        users.update("UPDATE users SET password=?, must_change_password=0 WHERE username=?", password, username);
+        users.update("UPDATE users SET password=?, must_change_password=0 WHERE username=?",
+                passwords.hash(password), username);
         Map<String, Object> me = me(username);
         return Map.of("message", "Password updated", "homePath", me.get("homePath"));
     }
@@ -229,7 +241,7 @@ public class VmsService {
         try {
             users.update(
                     "INSERT INTO users(first_name,last_name,username,email,password,is_admin,must_change_password,created_at,role,is_enabled) VALUES (?,?,?,?,?,0,1,?,?,1)",
-                    firstName, lastName, newUsername, email, props.getDefaultNewUserPassword(),
+                    firstName, lastName, newUsername, email, passwords.hash(props.getDefaultNewUserPassword()),
                     Instant.now().toString(), "user");
         } catch (Exception ex) {
             throw new ApiException(400, "A user with that email already exists.");
@@ -568,7 +580,7 @@ public class VmsService {
     }
 
     private List<Map<String, Object>> listVenues() {
-        return users.queryForList("SELECT id, label FROM nav_options ORDER BY label COLLATE NOCASE ASC");
+        return users.queryForList("SELECT id, label FROM nav_options ORDER BY label ASC");
     }
 
     private boolean canAccessVenue(Map<String, Object> user, Map<String, Object> option) {
@@ -594,21 +606,24 @@ public class VmsService {
 
     private void ensureWorkItems(int optionId, String label) {
         String defaultStatus = listStatusDefs().stream().findFirst().map(s -> str(s.get("label"))).orElse("Not started");
+        String sql = insertIgnoreNavWorkItemSql();
         for (Map<String, Object> def : listWorkItemDefs()) {
-            status.update(
-                    "INSERT OR IGNORE INTO nav_work_items(nav_option_id, option_label, item_name, status, updated_at) VALUES (?,?,?,?,?)",
-                    optionId, label, str(def.get("name")), defaultStatus, Instant.now().toString());
+            status.update(sql, optionId, label, str(def.get("name")), defaultStatus, Instant.now().toString());
         }
     }
 
     private void seedWorkItem(String name) {
         String defaultStatus = listStatusDefs().stream().findFirst().map(s -> str(s.get("label"))).orElse("Not started");
+        String sql = insertIgnoreNavWorkItemSql();
         for (Map<String, Object> v : listVenues()) {
-            status.update(
-                    "INSERT OR IGNORE INTO nav_work_items(nav_option_id, option_label, item_name, status, updated_at) VALUES (?,?,?,?,?)",
-                    v.get("id"), v.get("label"), name, defaultStatus, Instant.now().toString());
+            status.update(sql, v.get("id"), v.get("label"), name, defaultStatus, Instant.now().toString());
         }
         invalidateProgress();
+    }
+
+    private String insertIgnoreNavWorkItemSql() {
+        String prefix = props.isMysql() ? "INSERT IGNORE INTO" : "INSERT OR IGNORE INTO";
+        return prefix + " nav_work_items(nav_option_id, option_label, item_name, status, updated_at) VALUES (?,?,?,?,?)";
     }
 
     private List<Map<String, Object>> listWorkItemDefs() {

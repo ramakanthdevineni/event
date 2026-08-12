@@ -36,6 +36,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
 public class App {
     private static final Path INDEX_HTML = Path.of("index.html");
     private static final Path REGISTRATION_HTML = Path.of("registration.html");
@@ -304,6 +306,7 @@ public class App {
     }
 
     private static void createDefaultAdminUser() throws SQLException {
+       String hashed = new BCryptPasswordEncoder(12).encode(DEFAULT_ADMIN_PASSWORD);
        String insertSql = "INSERT OR IGNORE INTO users (first_name, last_name, username, email, password, is_admin, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
        try (Connection connection = DriverManager.getConnection(DB_URL)) {
            try (PreparedStatement statement = connection.prepareStatement(insertSql)) {
@@ -311,7 +314,7 @@ public class App {
                statement.setString(2, "User");
                statement.setString(3, DEFAULT_ADMIN_USERNAME);
                statement.setString(4, DEFAULT_ADMIN_EMAIL);
-               statement.setString(5, DEFAULT_ADMIN_PASSWORD);
+               statement.setString(5, hashed);
                statement.setInt(6, 1);
                statement.setInt(7, 0);
                statement.setString(8, Instant.now().toString());

@@ -1,10 +1,12 @@
 package com.example.web;
 
 import com.example.config.ConditionalOnService;
+import com.example.config.AppProperties;
 import com.example.service.VmsService;
-import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -16,20 +18,21 @@ public class CoreApiController {
     public static final String SESSION_COOKIE = "SESSIONID";
 
     private final VmsService vms;
+    private final AppProperties props;
 
-    public CoreApiController(VmsService vms) {
+    public CoreApiController(VmsService vms, AppProperties props) {
         this.vms = vms;
+        this.props = props;
     }
 
     @PostMapping("/api/login")
-    public ResponseEntity<?> login(@RequestBody Map<String, Object> body, HttpServletResponse response) {
+    public ResponseEntity<?> login(@RequestBody Map<String, Object> body,
+                                   HttpServletRequest request,
+                                   HttpServletResponse response) {
         try {
             Map<String, Object> me = vms.login(str(body, "username"), str(body, "password"));
             String sessionId = (String) me.remove("_sessionId");
-            Cookie cookie = new Cookie(SESSION_COOKIE, sessionId);
-            cookie.setPath("/");
-            cookie.setHttpOnly(true);
-            response.addCookie(cookie);
+            response.addHeader(HttpHeaders.SET_COOKIE, sessionCookie(request, sessionId, false).toString());
             return ResponseEntity.ok(me);
         } catch (VmsService.ApiException ex) {
             return ResponseEntity.status(ex.status).body(Map.of("message", ex.getMessage()));
@@ -39,11 +42,7 @@ public class CoreApiController {
     @PostMapping("/api/logout")
     public ResponseEntity<?> logout(HttpServletRequest request, HttpServletResponse response) {
         vms.logout(sessionId(request));
-        Cookie cookie = new Cookie(SESSION_COOKIE, "deleted");
-        cookie.setPath("/");
-        cookie.setMaxAge(0);
-        cookie.setHttpOnly(true);
-        response.addCookie(cookie);
+        response.addHeader(HttpHeaders.SET_COOKIE, sessionCookie(request, "deleted", true).toString());
         return ResponseEntity.ok(Map.of("message", "Logged out"));
     }
 
@@ -109,7 +108,7 @@ public class CoreApiController {
 
     static String sessionId(HttpServletRequest request) {
         if (request.getCookies() == null) return null;
-        for (Cookie c : request.getCookies()) {
+        for (var c : request.getCookies()) {
             if (SESSION_COOKIE.equals(c.getName())) return c.getValue();
         }
         return null;
@@ -119,6 +118,22 @@ public class CoreApiController {
         String username = vms.resolveSessionUsername(sessionId(request));
         if (username == null) throw new VmsService.ApiException(401, "Unauthorized");
         return username;
+    }
+
+    private ResponseCookie sessionCookie(HttpServletRequest request, String value, boolean clear) {
+        boolean secure = props.isCookieSecure()
+                || "https".equalsIgnoreCase(request.getHeader("X-Forwarded-Proto"))
+                || request.isSecure();
+        ResponseCookie.ResponseCookieBuilder builder = ResponseCookie.from(SESSION_COOKIE, value)
+                .path("/")
+                .httpOnly(true)
+                .secure(secure)
+                .sameSite(props.getCookieSameSite() == null || props.getCookieSameSite().isBlank()
+                        ? "Lax" : props.getCookieSameSite());
+        if (clear) {
+            builder.maxAge(0);
+        }
+        return builder.build();
     }
 
     static String str(Map<String, Object> body, String key) {
