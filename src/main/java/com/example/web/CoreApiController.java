@@ -106,6 +106,28 @@ public class CoreApiController {
         }
     }
 
+    @GetMapping("/api/reports")
+    public ResponseEntity<?> reports(HttpServletRequest request) {
+        try {
+            return ResponseEntity.ok(vms.listStatusChangeReports(requireUser(request)));
+        } catch (VmsService.ApiException ex) {
+            return ResponseEntity.status(ex.status).body(Map.of("message", ex.getMessage()));
+        }
+    }
+
+    @GetMapping("/api/reports/export")
+    public ResponseEntity<byte[]> reportsExport(HttpServletRequest request) {
+        try {
+            byte[] pdf = vms.reportsPdf(requireUser(request));
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"status-change-report.pdf\"")
+                    .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
+                    .body(pdf);
+        } catch (VmsService.ApiException ex) {
+            return ResponseEntity.status(ex.status).build();
+        }
+    }
+
     static String sessionId(HttpServletRequest request) {
         if (request.getCookies() == null) return null;
         for (var c : request.getCookies()) {

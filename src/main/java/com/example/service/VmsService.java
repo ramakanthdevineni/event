@@ -201,9 +201,95 @@ public class VmsService {
         if (name.isEmpty() || !validItem || !validStatus) {
             throw new ApiException(400, "Invalid work item status update.");
         }
+        String oldStatus = status.query(
+                "SELECT status FROM nav_work_items WHERE nav_option_id=? AND item_name=?",
+                rs -> rs.next() ? rs.getString(1) : "Not started",
+                optionId, name);
+        if (oldStatus == null) oldStatus = "Not started";
+        String now = Instant.now().toString();
+        long nowMs = System.currentTimeMillis();
         status.update("UPDATE nav_work_items SET status=?, updated_at=? WHERE nav_option_id=? AND item_name=?",
-                newStatus, Instant.now().toString(), optionId, name);
+                newStatus, now, optionId, name);
+        if (!oldStatus.equals(newStatus)) {
+            String display = (str(user.get("first_name")) + " " + str(user.get("last_name"))).trim();
+            if (display.isEmpty()) display = username;
+            status.update(
+                    "INSERT INTO status_change_logs(changed_at,changed_at_ms,username,user_display_name,venue_id,venue_label,item_name,old_status,new_status) VALUES (?,?,?,?,?,?,?,?,?)",
+                    now, nowMs, username, display, optionId, str(option.get("label")), name, oldStatus, newStatus);
+        }
         invalidateProgress();
+    }
+
+    public Map<String, Object> listStatusChangeReports(String username) {
+        requireReportAccess(username);
+        List<Map<String, Object>> rows = status.queryForList(
+                "SELECT id, changed_at, username, user_display_name, venue_id, venue_label, item_name, old_status, new_status " +
+                        "FROM status_change_logs ORDER BY changed_at_ms DESC LIMIT 500");
+        List<Map<String, Object>> entries = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("id", ((Number) row.get("id")).longValue());
+            e.put("changedAt", str(row.get("changed_at")));
+            e.put("username", str(row.get("username")));
+            e.put("userDisplayName", str(row.get("user_display_name")));
+            e.put("venueId", ((Number) row.get("venue_id")).longValue());
+            e.put("venueLabel", str(row.get("venue_label")));
+            e.put("itemName", str(row.get("item_name")));
+            e.put("oldStatus", str(row.get("old_status")));
+            e.put("newStatus", str(row.get("new_status")));
+            entries.add(e);
+        }
+        return Map.of("entries", entries);
+    }
+
+    public byte[] reportsPdf(String username) {
+        requireReportAccess(username);
+        try {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> entries = (List<Map<String, Object>>) listStatusChangeReports(username).get("entries");
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            Document doc = new Document();
+            PdfWriter.getInstance(doc, baos);
+            doc.open();
+            Font title = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 14);
+            Font header = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 9);
+            Font body = FontFactory.getFont(FontFactory.HELVETICA, 8);
+            doc.add(new Paragraph("VMS Status Change Report", title));
+            doc.add(new Paragraph("Generated: " + Instant.now(), body));
+            doc.add(new Paragraph(" "));
+            PdfPTable table = new PdfPTable(new float[]{2.2f, 1.8f, 1.6f, 1.6f, 1.6f, 1.6f});
+            table.setWidthPercentage(100);
+            for (String h : List.of("When", "User", "Venue", "Work Item", "From", "To")) {
+                PdfPCell cell = new PdfPCell(new Phrase(h, header));
+                table.addCell(cell);
+            }
+            for (Map<String, Object> e : entries) {
+                table.addCell(new PdfPCell(new Phrase(str(e.get("changedAt")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("userDisplayName")) + " (" + str(e.get("username")) + ")", body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("venueLabel")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("itemName")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("oldStatus")), body)));
+                table.addCell(new PdfPCell(new Phrase(str(e.get("newStatus")), body)));
+            }
+            if (entries.isEmpty()) {
+                PdfPCell empty = new PdfPCell(new Phrase("No status changes recorded yet.", body));
+                empty.setColspan(6);
+                table.addCell(empty);
+            }
+            doc.add(table);
+            doc.close();
+            return baos.toByteArray();
+        } catch (Exception ex) {
+            throw new ApiException(500, "Unable to export reports PDF right now.");
+        }
+    }
+
+    private void requireReportAccess(String username) {
+        Map<String, Object> user = loadUser(username);
+        String role = roleOf(user);
+        if (!hasAdmin(role) && !hasUser(role)) {
+            throw new ApiException(403, "Forbidden");
+        }
     }
 
     public Map<String, Object> listUsers(String currentUsername) {
@@ -526,6 +612,7 @@ public class VmsService {
             addNav(nav, "Users", "/users");
             addNav(nav, "Admin Panel", "/admin");
             addNav(nav, "Status", "/status");
+            addNav(nav, "Reports", "/reports");
             addNav(nav, "Mapview", "/mapview");
             for (Map<String, Object> v : venues) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
         } else {
@@ -533,6 +620,7 @@ public class VmsService {
             if (hasUser(role) || matched.isEmpty()) {
                 addNav(nav, "Dashboard", "/dashboard");
                 addNav(nav, "Users", "/users");
+                addNav(nav, "Reports", "/reports");
                 addNav(nav, "Mapview", "/mapview");
             } else {
                 addNav(nav, "Mapview", "/mapview");

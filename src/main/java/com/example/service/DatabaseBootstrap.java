@@ -126,6 +126,23 @@ public class DatabaseBootstrap {
                   INDEX idx_nav_work_items_option (nav_option_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        status.execute("""
+                CREATE TABLE IF NOT EXISTS status_change_logs (
+                  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                  changed_at VARCHAR(64) NOT NULL,
+                  changed_at_ms BIGINT NOT NULL,
+                  username VARCHAR(255) NOT NULL,
+                  user_display_name VARCHAR(255) NOT NULL,
+                  venue_id BIGINT NOT NULL,
+                  venue_label VARCHAR(255) NOT NULL,
+                  item_name VARCHAR(255) NOT NULL,
+                  old_status VARCHAR(255) NOT NULL,
+                  new_status VARCHAR(255) NOT NULL,
+                  INDEX idx_status_logs_time (changed_at_ms),
+                  INDEX idx_status_logs_venue (venue_id),
+                  INDEX idx_status_logs_user (username)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
     }
 
     private void seedDefaults() {
