@@ -8,10 +8,33 @@ type StatusPayload = {
   selected: VenueProgress | null
 }
 
+async function downloadStatusPdf() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const res = await fetch(`/api/status/export?tz=${encodeURIComponent(tz)}`, { credentials: 'include' })
+  if (!res.ok) {
+    let message = 'Unable to export status PDF.'
+    try {
+      const data = (await res.json()) as { message?: string }
+      if (data.message) message = data.message
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, message)
+  }
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'status-report.pdf'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 export function StatusPage() {
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState<StatusPayload | null>(null)
   const [error, setError] = useState('')
+  const [exporting, setExporting] = useState(false)
   const optionId = params.get('optionId')
 
   useEffect(() => {
@@ -28,7 +51,20 @@ export function StatusPage() {
   return (
     <div className="stack">
       <div className="top-actions" style={{ marginBottom: 0 }}>
-        <a className="btn" href={`/api/status/export?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`} target="_blank" rel="noreferrer">Export to PDF</a>
+        <button
+          type="button"
+          className="btn"
+          disabled={exporting}
+          onClick={() => {
+            setExporting(true)
+            setError('')
+            void downloadStatusPdf()
+              .catch((err) => setError(err instanceof ApiError ? err.message : 'Unable to export status PDF.'))
+              .finally(() => setExporting(false))
+          }}
+        >
+          {exporting ? 'Exporting…' : 'Export to PDF'}
+        </button>
       </div>
       <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
         <div className="card">

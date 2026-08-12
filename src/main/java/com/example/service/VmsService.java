@@ -4,6 +4,7 @@ import com.example.config.AppProperties;
 import com.example.map.SaudiMapGeometry;
 import com.example.security.PasswordService;
 import com.lowagie.text.Document;
+import com.lowagie.text.DocumentException;
 import com.lowagie.text.Font;
 import com.lowagie.text.FontFactory;
 import com.lowagie.text.Paragraph;
@@ -11,6 +12,7 @@ import com.lowagie.text.Phrase;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.pdf.PdfWriter;
+import java.awt.Color;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -19,6 +21,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -198,7 +201,8 @@ public class VmsService {
                 "id", optionId,
                 "label", str(option.get("label")),
                 "workItems", workItems,
-                "statuses", listStatusDefs()
+                "statuses", listStatusDefs(),
+                "canEdit", canEditVenue(user, option)
         );
     }
 
@@ -207,6 +211,7 @@ public class VmsService {
         Map<String, Object> option = findVenue(optionId);
         if (option == null) throw new ApiException(404, "Venue not found");
         if (!canAccessVenue(user, option)) throw new ApiException(403, "Forbidden");
+        if (!canEditVenue(user, option)) throw new ApiException(403, "You have read-only access to this venue.");
         final String name = trim(itemName);
         final String newStatus = trim(itemStatus);
         boolean validItem = listWorkItemDefs().stream().anyMatch(d -> str(d.get("name")).equals(name));
@@ -322,6 +327,31 @@ public class VmsService {
         }
     }
 
+    private void recordUserRoleChange(String actorUsername, String targetUsername,
+                                      String oldRolesSerialized, String newRolesSerialized, String changeType) {
+        if (Objects.equals(oldRolesSerialized, newRolesSerialized)) return;
+        String oldLabel = formatRolesForDisplay(oldRolesSerialized);
+        String newLabel = formatRolesForDisplay(newRolesSerialized);
+        String now = Instant.now().toString();
+        long nowMs = System.currentTimeMillis();
+        String actorDisplay = displayNameFor(actorUsername);
+        try {
+            users.update(
+                    "INSERT INTO user_role_history(changed_at,changed_at_ms,target_username,actor_username,actor_display_name,old_roles,new_roles,change_type) VALUES (?,?,?,?,?,?,?,?)",
+                    now, nowMs, targetUsername, actorUsername, actorDisplay, oldRolesSerialized, newRolesSerialized, changeType);
+        } catch (Exception ex) {
+            log.warn("Failed to write role history for {}: {}", targetUsername, ex.getMessage());
+        }
+        logActivity(actorUsername, "USER_ROLES_UPDATED", targetUsername,
+                "Roles changed for " + targetUsername + ": " + oldLabel + " → " + newLabel,
+                "", "", oldLabel, newLabel);
+    }
+
+    private static String formatRolesForDisplay(String serialized) {
+        if (serialized == null || serialized.isBlank()) return "(none)";
+        return String.join(", ", parseRoles(serialized));
+    }
+
     private void logActivity(String actorUsername, String eventType, String target, String details) {
         logActivity(actorUsername, eventType, target, details, "", "", "", "");
     }
@@ -357,6 +387,8 @@ public class VmsService {
             case "USER_DELETED" -> "User deleted";
             case "USER_ENABLED" -> "User enabled";
             case "USER_DISABLED" -> "User disabled";
+            case "USER_ROLES_UPDATED" -> "User roles updated";
+            case "USER_ROLES_BULK_UPDATED" -> "User roles bulk updated";
             case "USER_LOGIN" -> "User logged in";
             case "USER_LOGOUT" -> "User logged out";
             case "VENUE_CREATED" -> "Venue created";
@@ -375,6 +407,7 @@ public class VmsService {
     private static boolean isValidEventType(String eventType) {
         return switch (eventType) {
             case "VENUE_STATUS_CHANGE", "USER_CREATED", "USER_DELETED", "USER_ENABLED", "USER_DISABLED",
+                 "USER_ROLES_UPDATED", "USER_ROLES_BULK_UPDATED",
                  "USER_LOGIN", "USER_LOGOUT", "VENUE_CREATED", "VENUE_UPDATED", "VENUE_DELETED",
                  "WORK_ITEM_CREATED", "WORK_ITEM_UPDATED", "WORK_ITEM_DELETED",
                  "STATUS_CREATED", "STATUS_UPDATED", "STATUS_DELETED" -> true;
@@ -488,6 +521,213 @@ public class VmsService {
                 + props.getDefaultNewUserPassword() + ".");
     }
 
+    public byte[] exportUsersCsv(String currentUsername) {
+        requireAdmin(currentUsername);
+        StringBuilder sb = new StringBuilder();
+        sb.append('\uFEFF');
+        sb.append("firstName,lastName,email,status,roles\n");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) listUsers(currentUsername).get("users");
+        for (Map<String, Object> u : rows) {
+            sb.append(csvCell(str(u.get("firstName")))).append(',');
+            sb.append(csvCell(str(u.get("lastName")))).append(',');
+            sb.append(csvCell(str(u.get("email")))).append(',');
+            sb.append(csvCell(Boolean.TRUE.equals(u.get("enabled")) ? "Active" : "Disabled")).append(',');
+            @SuppressWarnings("unchecked")
+            List<String> roles = (List<String>) u.get("roles");
+            sb.append(csvCell(String.join("|", roles))).append('\n');
+        }
+        return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    public Map<String, Object> importUsersCsv(String currentUsername, byte[] csvBytes) {
+        requireAdmin(currentUsername);
+        if (csvBytes == null || csvBytes.length == 0) {
+            throw new ApiException(400, "CSV file is empty.");
+        }
+        String text = new String(csvBytes, StandardCharsets.UTF_8).replace("\uFEFF", "");
+        List<String[]> rows = parseCsvRows(text);
+        if (rows.isEmpty()) throw new ApiException(400, "CSV file has no data rows.");
+
+        int start = 0;
+        if (rows.get(0).length >= 3 && "firstname".equals(rows.get(0)[0].trim().toLowerCase(Locale.ROOT))) {
+            start = 1;
+        }
+        if (start >= rows.size()) throw new ApiException(400, "CSV file has no user rows.");
+
+        int created = 0;
+        int updated = 0;
+        int skipped = 0;
+        List<String> errors = new ArrayList<>();
+
+        for (int i = start; i < rows.size(); i++) {
+            String[] cols = rows.get(i);
+            if (cols.length == 0 || Arrays.stream(cols).allMatch(c -> c == null || c.isBlank())) continue;
+            int rowNum = i + 1;
+            try {
+                if (cols.length < 5) {
+                    throw new ApiException(400, "Expected 5 columns: firstName,lastName,email,status,roles");
+                }
+                String firstName = trim(cols[0]);
+                String lastName = trim(cols[1]);
+                String email = trim(cols[2]);
+                String status = trim(cols[3]);
+                String rolesRaw = trim(cols[4]);
+                if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty()) {
+                    throw new ApiException(400, "firstName, lastName, and email are required.");
+                }
+                List<String> roles = parseRolesImport(rolesRaw);
+                if (!validRoles(roles)) throw new ApiException(400, "Invalid roles: " + rolesRaw);
+                boolean enabled = parseEnabledStatus(status);
+                String username = email.toLowerCase(Locale.ROOT);
+                String serialized = serializeRoles(roles);
+
+                List<Map<String, Object>> existing = users.queryForList(
+                        "SELECT username FROM users WHERE username=? OR LOWER(email)=?",
+                        username, username);
+                if (existing.isEmpty()) {
+                    users.update(
+                            "INSERT INTO users(first_name,last_name,username,email,password,is_admin,must_change_password,created_at,role,is_enabled) VALUES (?,?,?,?,?,?,1,?,?,?)",
+                            firstName, lastName, username, email, passwords.hash(props.getDefaultNewUserPassword()),
+                            hasAdmin(serialized) ? 1 : 0, Instant.now().toString(), serialized, enabled ? 1 : 0);
+                    logActivity(currentUsername, "USER_CREATED", username,
+                            "Imported user " + firstName + " " + lastName + " (" + email + ")");
+                    created++;
+                } else {
+                    String target = str(existing.get(0).get("username"));
+                    if (!enabled && (target.equals(currentUsername) || props.getDefaultAdminUsername().equals(target))) {
+                        throw new ApiException(400, "Cannot disable protected account.");
+                    }
+                    Map<String, Object> row = findUserRow(target);
+                    String oldRole = roleOf(row);
+                    users.update(
+                            "UPDATE users SET first_name=?, last_name=?, email=?, role=?, is_admin=?, is_enabled=? WHERE username=?",
+                            firstName, lastName, email, serialized, hasAdmin(serialized) ? 1 : 0, enabled ? 1 : 0, target);
+                    if (!enabled) users.update("DELETE FROM sessions WHERE username=?", target);
+                    recordUserRoleChange(currentUsername, target, oldRole, serialized, "import");
+                    updated++;
+                }
+            } catch (ApiException ex) {
+                skipped++;
+                errors.add("Row " + rowNum + ": " + ex.getMessage());
+            } catch (Exception ex) {
+                skipped++;
+                errors.add("Row " + rowNum + ": " + (ex.getMessage() == null ? "Import failed." : ex.getMessage()));
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("message", "Import finished. Created " + created + ", updated " + updated + ", skipped " + skipped + ".");
+        result.put("created", created);
+        result.put("updated", updated);
+        result.put("skipped", skipped);
+        result.put("errors", errors);
+        return result;
+    }
+
+    private static String csvCell(String value) {
+        if (value == null) value = "";
+        if (value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r")) {
+            return "\"" + value.replace("\"", "\"\"") + "\"";
+        }
+        return value;
+    }
+
+    private static List<String> parseRolesImport(String raw) {
+        if (raw == null || raw.isBlank()) return normalizeRoles(List.of("user"));
+        if (raw.contains("|")) {
+            List<String> parts = new ArrayList<>();
+            for (String part : raw.split("\\|")) {
+                String t = part.trim();
+                if (!t.isEmpty()) parts.add(t);
+            }
+            return normalizeRoles(parts);
+        }
+        return normalizeRoles(parseRoles(raw));
+    }
+
+    private static boolean parseEnabledStatus(String status) {
+        String s = status == null ? "" : status.trim().toLowerCase(Locale.ROOT);
+        return !(s.equals("disabled") || s.equals("inactive") || s.equals("no") || s.equals("false") || s.equals("0"));
+    }
+
+    private static List<String[]> parseCsvRows(String text) {
+        List<String[]> rows = new ArrayList<>();
+        List<String> cells = new ArrayList<>();
+        StringBuilder cell = new StringBuilder();
+        boolean inQuotes = false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inQuotes) {
+                if (c == '"') {
+                    if (i + 1 < text.length() && text.charAt(i + 1) == '"') {
+                        cell.append('"');
+                        i++;
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    cell.append(c);
+                }
+            } else if (c == '"') {
+                inQuotes = true;
+            } else if (c == ',') {
+                cells.add(cell.toString());
+                cell.setLength(0);
+            } else if (c == '\n') {
+                cells.add(cell.toString());
+                cell.setLength(0);
+                rows.add(cells.toArray(String[]::new));
+                cells = new ArrayList<>();
+            } else if (c != '\r') {
+                cell.append(c);
+            }
+        }
+        cells.add(cell.toString());
+        if (!cells.isEmpty() && !(cells.size() == 1 && cells.get(0).isBlank())) {
+            rows.add(cells.toArray(String[]::new));
+        }
+        return rows;
+    }
+
+    public Map<String, Object> bulkUpdateUserRoles(String currentUsername, List<String> usernames, List<String> roles) {
+        requireAdmin(currentUsername);
+        roles = normalizeRoles(roles);
+        if (!validRoles(roles)) throw new ApiException(400, "Invalid role selected.");
+        if (usernames == null || usernames.isEmpty()) {
+            throw new ApiException(400, "Select at least one user.");
+        }
+        String serialized = serializeRoles(roles);
+        String roleLabel = roles.isEmpty() ? "(none)" : String.join(", ", roles);
+        int updated = 0;
+        List<String> errors = new ArrayList<>();
+        for (String target : usernames) {
+            target = trim(target);
+            if (target.isEmpty()) continue;
+            try {
+                Map<String, Object> row = findUserRow(target);
+                String oldRole = roleOf(row);
+                users.update("UPDATE users SET role=?, is_admin=? WHERE username=?",
+                        serialized, hasAdmin(serialized) ? 1 : 0, target);
+                recordUserRoleChange(currentUsername, target, oldRole, serialized, "bulk");
+                updated++;
+            } catch (ApiException ex) {
+                errors.add(target + ": " + ex.getMessage());
+            } catch (Exception ex) {
+                errors.add(target + ": unable to update");
+            }
+        }
+        if (updated > 0) {
+            logActivity(currentUsername, "USER_ROLES_BULK_UPDATED", String.valueOf(updated),
+                    "Bulk-updated roles for " + updated + " user(s) to " + roleLabel);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("message", "Updated roles for " + updated + " user(s).");
+        result.put("updated", updated);
+        result.put("errors", errors);
+        return result;
+    }
+
     public Map<String, Object> mutateUser(String currentUsername, String action, String target,
                                           String firstName, String lastName, String email, List<String> roles) {
         requireAdmin(currentUsername);
@@ -517,9 +757,12 @@ public class VmsService {
             }
             case "update-role" -> {
                 if (!validRoles(roles)) throw new ApiException(400, "Invalid role selected.");
+                Map<String, Object> t = findUserRow(target);
+                String oldRole = roleOf(t);
                 String serialized = serializeRoles(roles);
                 users.update("UPDATE users SET role=?, is_admin=? WHERE username=?",
                         serialized, hasAdmin(serialized) ? 1 : 0, target);
+                recordUserRoleChange(currentUsername, target, oldRole, serialized, "update");
                 return Map.of("message", "Roles updated");
             }
             case "update" -> {
@@ -528,9 +771,12 @@ public class VmsService {
                     throw new ApiException(400, "All fields are required.");
                 }
                 if (!validRoles(roles)) throw new ApiException(400, "Invalid role selected.");
+                Map<String, Object> t = findUserRow(target);
+                String oldRole = roleOf(t);
                 String serialized = serializeRoles(roles);
                 users.update("UPDATE users SET first_name=?, last_name=?, email=?, role=?, is_admin=? WHERE username=?",
                         firstName, lastName, email, serialized, hasAdmin(serialized) ? 1 : 0, target);
+                recordUserRoleChange(currentUsername, target, oldRole, serialized, "update");
                 return Map.of("message", "User updated");
             }
             default -> throw new ApiException(400, "Unknown action");
@@ -665,7 +911,7 @@ public class VmsService {
     }
 
     public Map<String, Object> status(String username, Integer optionId) {
-        requireAdmin(username);
+        requireStandardAccess(username);
         List<Map<String, Object>> venues = listOptionProgress();
         Map<String, Object> selected = null;
         if (optionId != null) {
@@ -679,7 +925,7 @@ public class VmsService {
     }
 
     public byte[] statusPdf(String username, String timeZone) {
-        requireAdmin(username);
+        requireStandardAccess(username);
         try {
             List<Map<String, Object>> venues = listOptionProgress();
             Map<String, Integer> statusPercent = new LinkedHashMap<>();
@@ -706,7 +952,8 @@ public class VmsService {
             summary.addCell(new PdfPCell(new Phrase("Progress", header)));
             for (Map<String, Object> v : venues) {
                 summary.addCell(new PdfPCell(new Phrase(str(v.get("label")), body)));
-                summary.addCell(new PdfPCell(new Phrase(str(v.get("percent")) + "%", body)));
+                int pct = ((Number) v.get("percent")).intValue();
+                summary.addCell(progressPdfCell(pct, body, true));
             }
             doc.add(summary);
             doc.add(new Paragraph(" "));
@@ -735,7 +982,7 @@ public class VmsService {
                         int pct = statusPercent.getOrDefault(statusLabel, 0);
                         detail.addCell(new PdfPCell(new Phrase(str(item.get("name")), body)));
                         detail.addCell(new PdfPCell(new Phrase(statusLabel, body)));
-                        detail.addCell(new PdfPCell(new Phrase(pct + "%", body)));
+                        detail.addCell(progressPdfCell(pct, body, false));
                     }
                 }
                 doc.add(detail);
@@ -816,6 +1063,7 @@ public class VmsService {
         me.put("role", role);
         me.put("roles", roles);
         me.put("isAdmin", hasAdmin(role));
+        me.put("readOnly", hasUser(role) && !hasAdmin(role));
         me.put("mustChangePassword", ((Number) u.get("must_change_password")).intValue() == 1);
         me.put("homePath", home);
         me.put("nav", nav);
@@ -837,16 +1085,17 @@ public class VmsService {
             addNav(nav, "Logs", "/logs");
             addNav(nav, "Mapview", "/mapview");
             for (Map<String, Object> v : venues) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
+        } else if (hasUser(role)) {
+            addNav(nav, "Home", "/home");
+            addNav(nav, "Users", "/users");
+            addNav(nav, "Status", "/status");
+            addNav(nav, "Logs", "/logs");
+            addNav(nav, "Mapview", "/mapview");
+            for (Map<String, Object> v : venues) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
         } else {
             List<Map<String, Object>> matched = matchedVenues(role, venues);
             addNav(nav, "Home", "/home");
-            if (hasUser(role) || matched.isEmpty()) {
-                addNav(nav, "Users", "/users");
-                addNav(nav, "Logs", "/logs");
-                addNav(nav, "Mapview", "/mapview");
-            } else {
-                addNav(nav, "Mapview", "/mapview");
-            }
+            addNav(nav, "Mapview", "/mapview");
             for (Map<String, Object> v : matched) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
         }
         return nav;
@@ -890,9 +1139,25 @@ public class VmsService {
 
     private boolean canAccessVenue(Map<String, Object> user, Map<String, Object> option) {
         String role = roleOf(user);
-        if (hasAdmin(role)) return true;
+        if (hasAdmin(role) || hasUser(role)) return true;
         String label = str(option.get("label"));
         return parseRoles(role).stream().anyMatch(r -> r.equalsIgnoreCase(label));
+    }
+
+    private boolean canEditVenue(Map<String, Object> user, Map<String, Object> option) {
+        String role = roleOf(user);
+        if (hasAdmin(role)) return true;
+        String label = str(option.get("label"));
+        return parseRoles(role).stream()
+                .anyMatch(r -> !r.equalsIgnoreCase("admin") && !r.equalsIgnoreCase("user") && r.equalsIgnoreCase(label));
+    }
+
+    private void requireStandardAccess(String username) {
+        Map<String, Object> user = loadUser(username);
+        String role = roleOf(user);
+        if (!hasAdmin(role) && !hasUser(role)) {
+            throw new ApiException(403, "Forbidden");
+        }
     }
 
     private List<Map<String, Object>> matchedVenues(String roleCsv, List<Map<String, Object>> venues) {
@@ -1056,6 +1321,61 @@ public class VmsService {
         if (p >= 50) return "#ca8a04";
         if (p >= 25) return "#ea580c";
         return "#dc2626";
+    }
+
+    private static Color hexToColor(String hex) {
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        return new Color(
+                Integer.parseInt(h.substring(0, 2), 16),
+                Integer.parseInt(h.substring(2, 4), 16),
+                Integer.parseInt(h.substring(4, 6), 16)
+        );
+    }
+
+    private static PdfPCell progressPdfCell(int percent, Font font, boolean overallLabel) throws DocumentException {
+        int p = Math.max(0, Math.min(100, percent));
+        Color fill = hexToColor(progressColor(p));
+        Color track = new Color(226, 232, 240);
+
+        PdfPTable container = new PdfPTable(1);
+        container.setWidthPercentage(100);
+
+        PdfPTable bar = new PdfPTable(2);
+        bar.setWidthPercentage(100);
+        float left = Math.max(p, 0.5f);
+        float right = Math.max(100 - p, 0.5f);
+        bar.setWidths(new float[]{left, right});
+
+        PdfPCell filled = new PdfPCell();
+        filled.setBackgroundColor(p > 0 ? fill : track);
+        filled.setFixedHeight(10);
+        filled.setBorder(PdfPCell.NO_BORDER);
+
+        PdfPCell remainder = new PdfPCell();
+        remainder.setBackgroundColor(track);
+        remainder.setFixedHeight(10);
+        remainder.setBorder(PdfPCell.NO_BORDER);
+
+        bar.addCell(filled);
+        bar.addCell(remainder);
+
+        PdfPCell barWrap = new PdfPCell(bar);
+        barWrap.setBorder(PdfPCell.NO_BORDER);
+        barWrap.setPadding(0);
+        barWrap.setPaddingBottom(3);
+        container.addCell(barWrap);
+
+        Font pctFont = new Font(font);
+        pctFont.setColor(fill);
+        String label = overallLabel ? p + "% overall" : p + "%";
+        PdfPCell text = new PdfPCell(new Phrase(label, pctFont));
+        text.setBorder(PdfPCell.NO_BORDER);
+        text.setPadding(0);
+        container.addCell(text);
+
+        PdfPCell outer = new PdfPCell(container);
+        outer.setPadding(5);
+        return outer;
     }
 
     private static List<String> parseRoles(String csv) {

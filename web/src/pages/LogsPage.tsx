@@ -34,6 +34,8 @@ const EVENT_TYPE_OPTIONS = [
   { value: 'USER_DELETED', label: 'User deleted' },
   { value: 'USER_ENABLED', label: 'User enabled' },
   { value: 'USER_DISABLED', label: 'User disabled' },
+  { value: 'USER_ROLES_UPDATED', label: 'User roles updated' },
+  { value: 'USER_ROLES_BULK_UPDATED', label: 'User roles bulk updated' },
   { value: 'VENUE_CREATED', label: 'Venue created' },
   { value: 'VENUE_UPDATED', label: 'Venue updated' },
   { value: 'VENUE_DELETED', label: 'Venue deleted' },

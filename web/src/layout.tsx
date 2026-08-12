@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from './auth'
-import type { NavItem } from './types'
+import type { Me, NavItem } from './types'
+
+function useVenueDropdown(me: Me): boolean {
+  if (me.isAdmin) return true
+  const hasUserRole = me.roles.some((r) => r.toLowerCase() === 'user')
+  return me.readOnly || (hasUserRole && !me.isAdmin)
+}
 
 function NavVenueDropdown({ venues, onNavigate }: { venues: NavItem[]; onNavigate: () => void }) {
   const location = useLocation()
@@ -49,7 +55,7 @@ export function AppLayout() {
 
   const { mainNav, venueNav } = useMemo(() => {
     if (!me) return { mainNav: [] as NavItem[], venueNav: [] as NavItem[] }
-    if (!me.isAdmin) return { mainNav: me.nav, venueNav: [] as NavItem[] }
+    if (!useVenueDropdown(me)) return { mainNav: me.nav, venueNav: [] as NavItem[] }
     const main: NavItem[] = []
     const venues: NavItem[] = []
     for (const item of me.nav) {
@@ -92,7 +98,7 @@ export function AppLayout() {
                 {item.label}
               </NavLink>
             ))}
-            {me.isAdmin && venueNav.length > 0 && (
+            {venueNav.length > 0 && useVenueDropdown(me) && (
               <NavVenueDropdown venues={venueNav} onNavigate={() => setOpen(false)} />
             )}
           </nav>

@@ -149,6 +149,22 @@ public class DatabaseBootstrap {
                 """);
         migrateStatusChangeLogsToActivityLogs();
         migrateUserLoginColumns();
+        users.execute("""
+                CREATE TABLE IF NOT EXISTS user_role_history (
+                  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                  changed_at VARCHAR(64) NOT NULL,
+                  changed_at_ms BIGINT NOT NULL,
+                  target_username VARCHAR(255) NOT NULL,
+                  actor_username VARCHAR(255) NOT NULL,
+                  actor_display_name VARCHAR(255) NOT NULL,
+                  old_roles VARCHAR(512) NOT NULL DEFAULT '',
+                  new_roles VARCHAR(512) NOT NULL DEFAULT '',
+                  change_type VARCHAR(32) NOT NULL DEFAULT 'update',
+                  INDEX idx_user_role_history_target (target_username),
+                  INDEX idx_user_role_history_time (changed_at_ms),
+                  INDEX idx_user_role_history_actor (actor_username)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
     }
 
     private void migrateUserLoginColumns() {

@@ -408,6 +408,28 @@ table.data th {
   caret-color: #fff;
 }
 
+.role-dd-actions {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+  flex-shrink: 0;
+}
+
+.role-dd-actions button {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.role-dd-actions button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .role-checks {
   overflow: auto;
   display: flex;

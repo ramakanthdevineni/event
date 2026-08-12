@@ -68,6 +68,25 @@ export function RoleDropdown({ options, selected, onChange, summaryFallback = 'S
   }, [open])
 
   const filtered = options.filter((o) => o.label.toLowerCase().includes(query.trim().toLowerCase()))
+  const filteredLabel = query.trim() ? ` (${filtered.length} shown)` : ''
+
+  const selectAll = () => {
+    const values = filtered.map((o) => o.value)
+    const merged = [...selected]
+    for (const v of values) {
+      if (!merged.some((s) => s.toLowerCase() === v.toLowerCase())) merged.push(v)
+    }
+    onChange(merged)
+  }
+
+  const unselectAll = () => {
+    if (!query.trim()) {
+      onChange([])
+      return
+    }
+    const remove = new Set(filtered.map((o) => o.value.toLowerCase()))
+    onChange(selected.filter((s) => !remove.has(s.toLowerCase())))
+  }
 
   return (
     <div className="role-dd" ref={rootRef} data-role-dropdown>
@@ -105,6 +124,14 @@ export function RoleDropdown({ options, selected, onChange, summaryFallback = 'S
             onChange={(e) => setQuery(e.target.value)}
             autoComplete="off"
           />
+          <div className="role-dd-actions">
+            <button type="button" onClick={selectAll}>
+              Select all{filteredLabel}
+            </button>
+            <button type="button" onClick={unselectAll}>
+              Unselect all{filteredLabel}
+            </button>
+          </div>
           <div className="role-checks">
             {filtered.map((o) => {
               const checked = selected.some((s) => s.toLowerCase() === o.value.toLowerCase())

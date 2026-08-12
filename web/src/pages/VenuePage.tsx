@@ -8,6 +8,7 @@ type VenuePayload = {
   label: string
   workItems: WorkItem[]
   statuses: StatusDef[]
+  canEdit?: boolean
 }
 
 export function VenuePage() {
@@ -36,7 +37,11 @@ export function VenuePage() {
   return (
     <div className="card">
       <h1 style={{ margin: '0 0 0.25rem' }}>Welcome to {data.label}</h1>
-      <p className="muted" style={{ margin: 0 }}>Track progress for the work items below.</p>
+      <p className="muted" style={{ margin: 0 }}>
+        {data.canEdit === false
+          ? 'View-only access — work item status cannot be changed.'
+          : 'Track progress for the work items below.'}
+      </p>
       <div className="table-wrap" style={{ marginTop: '1.25rem' }}>
         <table className="data">
           <thead><tr><th>Work Item</th><th>Status</th></tr></thead>
@@ -45,15 +50,19 @@ export function VenuePage() {
               <tr key={item.name}>
                 <td><strong>{item.name}</strong></td>
                 <td>
-                  <select
-                    value={item.status}
-                    onChange={(e) => void updateStatus(item.name, e.target.value)}
-                    style={{ minWidth: 160, padding: '0.5rem 0.75rem', borderRadius: 10, border: '1px solid rgba(255,255,255,0.25)', background: '#1e293b', color: '#f8fafc' }}
-                  >
-                    {data.statuses.map((s) => (
-                      <option key={s.id} value={s.label}>{s.label}</option>
-                    ))}
-                  </select>
+                  {data.canEdit === false ? (
+                    <span>{item.status}</span>
+                  ) : (
+                    <select
+                      value={item.status}
+                      onChange={(e) => void updateStatus(item.name, e.target.value)}
+                      style={{ minWidth: 160, padding: '0.5rem 0.75rem', borderRadius: 10, border: '1px solid rgba(255,255,255,0.25)', background: '#1e293b', color: '#f8fafc' }}
+                    >
+                      {data.statuses.map((s) => (
+                        <option key={s.id} value={s.label}>{s.label}</option>
+                      ))}
+                    </select>
+                  )}
                 </td>
               </tr>
             ))}

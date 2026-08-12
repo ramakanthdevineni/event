@@ -8,6 +8,7 @@ export type Me = {
   role: string
   roles: string[]
   isAdmin: boolean
+  readOnly: boolean
   mustChangePassword: boolean
   homePath: string
   nav: NavItem[]
