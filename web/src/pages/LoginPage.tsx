@@ -35,6 +35,7 @@ export function LoginPage() {
     <div className="login-page">
       <main className="login-card">
         <div className="login-card-header">
+          <img src="/vms-logo.png" alt="VMS" className="login-logo" />
           <h1>VMS</h1>
           <p>Hello Venue Technology Team</p>
         </div>

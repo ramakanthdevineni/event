@@ -108,17 +108,23 @@ export function AppLayout() {
       </aside>
       <main className="main">
         <div className="top-actions">
-          <Link className="btn btn-secondary" to="/profile">Edit Profile</Link>
-          <button
-            type="button"
-            className="btn btn-danger"
-            onClick={async () => {
-              await logout()
-              navigate('/login', { replace: true })
-            }}
-          >
-            Logout
-          </button>
+          <div className="app-brand">
+            <img src="/vms-logo.png" alt="VMS" className="app-logo" />
+            <h1 className="app-title">VENUE MANAGEMENT SYSTEM</h1>
+          </div>
+          <div className="top-actions-buttons">
+            <Link className="btn btn-secondary" to="/profile">Edit Profile</Link>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={async () => {
+                await logout()
+                navigate('/login', { replace: true })
+              }}
+            >
+              Logout
+            </button>
+          </div>
         </div>
         <Outlet />
       </main>

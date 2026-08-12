@@ -1203,7 +1203,8 @@ public class VmsService {
             now = System.currentTimeMillis();
             if (workItemDefsCache != null && now - workItemDefsCacheAtMs < 1000) return workItemDefsCache;
             List<Map<String, Object>> rows = status.queryForList(
-                    "SELECT id, name, sort_order AS sortOrder FROM work_item_defs ORDER BY sort_order ASC, id ASC");
+                    "SELECT id, name, sort_order AS sortOrder FROM work_item_defs");
+            rows.sort(Comparator.comparing(m -> str(m.get("name")), String.CASE_INSENSITIVE_ORDER));
             workItemDefsCache = List.copyOf(rows);
             workItemDefsCacheAtMs = now;
             return workItemDefsCache;
