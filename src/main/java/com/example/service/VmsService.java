@@ -20,6 +20,8 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -278,7 +280,7 @@ public class VmsService {
         return Map.of("entries", entries);
     }
 
-    public byte[] activityLogsPdf(String username, String userFilter, String eventTypeFilter, String fromDate, String toDate) {
+    public byte[] activityLogsPdf(String username, String userFilter, String eventTypeFilter, String fromDate, String toDate, String timeZone) {
         requireReportAccess(username);
         try {
             @SuppressWarnings("unchecked")
@@ -291,15 +293,15 @@ public class VmsService {
             Font header = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 9);
             Font body = FontFactory.getFont(FontFactory.HELVETICA, 8);
             doc.add(new Paragraph("VMS Activity Logs", title));
-            doc.add(new Paragraph("Generated: " + Instant.now(), body));
+            doc.add(new Paragraph("Generated: " + formatPdfLocalNow(timeZone), body));
             doc.add(new Paragraph(" "));
             PdfPTable table = new PdfPTable(new float[]{2f, 1.6f, 1.4f, 2f, 2.2f});
             table.setWidthPercentage(100);
-            for (String h : List.of("When", "User", "Event", "Target", "Details")) {
+            for (String h : List.of("Date&Time", "User", "Event", "Target", "Details")) {
                 table.addCell(new PdfPCell(new Phrase(h, header)));
             }
             for (Map<String, Object> e : entries) {
-                table.addCell(new PdfPCell(new Phrase(str(e.get("changedAt")), body)));
+                table.addCell(new PdfPCell(new Phrase(formatPdfLocalDateTime(str(e.get("changedAt")), timeZone), body)));
                 table.addCell(new PdfPCell(new Phrase(str(e.get("userDisplayName")) + " (" + str(e.get("username")) + ")", body)));
                 table.addCell(new PdfPCell(new Phrase(str(e.get("eventLabel")), body)));
                 table.addCell(new PdfPCell(new Phrase(str(e.get("target")), body)));
@@ -356,7 +358,14 @@ public class VmsService {
             case "USER_LOGIN" -> "User logged in";
             case "USER_LOGOUT" -> "User logged out";
             case "VENUE_CREATED" -> "Venue created";
+            case "VENUE_UPDATED" -> "Venue updated";
+            case "VENUE_DELETED" -> "Venue deleted";
             case "WORK_ITEM_CREATED" -> "Work item created";
+            case "WORK_ITEM_UPDATED" -> "Work item updated";
+            case "WORK_ITEM_DELETED" -> "Work item deleted";
+            case "STATUS_CREATED" -> "Status created";
+            case "STATUS_UPDATED" -> "Status updated";
+            case "STATUS_DELETED" -> "Status deleted";
             default -> eventType;
         };
     }
@@ -364,7 +373,9 @@ public class VmsService {
     private static boolean isValidEventType(String eventType) {
         return switch (eventType) {
             case "VENUE_STATUS_CHANGE", "USER_CREATED", "USER_DELETED", "USER_ENABLED", "USER_DISABLED",
-                 "USER_LOGIN", "USER_LOGOUT", "VENUE_CREATED", "WORK_ITEM_CREATED" -> true;
+                 "USER_LOGIN", "USER_LOGOUT", "VENUE_CREATED", "VENUE_UPDATED", "VENUE_DELETED",
+                 "WORK_ITEM_CREATED", "WORK_ITEM_UPDATED", "WORK_ITEM_DELETED",
+                 "STATUS_CREATED", "STATUS_UPDATED", "STATUS_DELETED" -> true;
             default -> false;
         };
     }
@@ -392,6 +403,33 @@ public class VmsService {
         } catch (Exception ex) {
             return null;
         }
+    }
+
+    private static ZoneId resolveZone(String timeZone) {
+        if (timeZone == null || timeZone.isBlank()) {
+            return ZoneId.systemDefault();
+        }
+        try {
+            return ZoneId.of(timeZone.trim());
+        } catch (Exception ex) {
+            return ZoneId.systemDefault();
+        }
+    }
+
+    private static String formatPdfLocalDateTime(String iso, String timeZone) {
+        if (iso == null || iso.isBlank()) return "";
+        try {
+            Instant instant = Instant.parse(iso);
+            return DateTimeFormatter.ofPattern("M/d/yyyy, h:mm:ss a", Locale.US)
+                    .withZone(resolveZone(timeZone))
+                    .format(instant);
+        } catch (Exception ex) {
+            return iso;
+        }
+    }
+
+    private static String formatPdfLocalNow(String timeZone) {
+        return formatPdfLocalDateTime(Instant.now().toString(), timeZone);
     }
 
     private void requireReportAccess(String username) {
@@ -528,14 +566,19 @@ public class VmsService {
                 users.update("UPDATE nav_options SET label=? WHERE id=?", label, id);
                 status.update("UPDATE nav_work_items SET option_label=? WHERE nav_option_id=?", label, id);
                 if (old != null && !old.equals(label)) renameRoleLabel(old, label);
+                logActivity(username, "VENUE_UPDATED", label,
+                        old != null && !old.equals(label) ? "Renamed venue " + old + " → " + label : "Updated venue " + label);
                 invalidateProgress();
                 yield Map.of("message", "Venue updated");
             }
             case "venue-delete", "delete" -> {
                 int id = num(body.get("id"));
                 if (id <= 0) throw new ApiException(400, "Invalid venue.");
+                String label = users.query("SELECT label FROM nav_options WHERE id=?", rs -> rs.next() ? rs.getString(1) : null, id);
                 status.update("DELETE FROM nav_work_items WHERE nav_option_id=?", id);
                 users.update("DELETE FROM nav_options WHERE id=?", id);
+                logActivity(username, "VENUE_DELETED", label != null ? label : String.valueOf(id),
+                        "Deleted venue " + (label != null ? label : id));
                 invalidateProgress();
                 yield Map.of("message", "Venue deleted");
             }
@@ -559,6 +602,9 @@ public class VmsService {
                     status.update("UPDATE nav_work_items SET item_name=?, updated_at=? WHERE item_name=?",
                             name, Instant.now().toString(), old);
                 }
+                logActivity(username, "WORK_ITEM_UPDATED", name,
+                        old != null && !old.equals(name) ? "Renamed work item " + old + " → " + name : "Updated work item " + name,
+                        "", name, old != null ? old : "", name);
                 invalidateDefs();
                 yield Map.of("message", "Work item updated");
             }
@@ -568,6 +614,8 @@ public class VmsService {
                 String old = status.query("SELECT name FROM work_item_defs WHERE id=?", rs -> rs.next() ? rs.getString(1) : null, id);
                 status.update("DELETE FROM work_item_defs WHERE id=?", id);
                 if (old != null) status.update("DELETE FROM nav_work_items WHERE item_name=?", old);
+                logActivity(username, "WORK_ITEM_DELETED", old != null ? old : String.valueOf(id),
+                        "Deleted work item " + (old != null ? old : id));
                 invalidateDefs();
                 yield Map.of("message", "Work item deleted");
             }
@@ -577,6 +625,7 @@ public class VmsService {
                 if (label.isEmpty()) throw new ApiException(400, "Status label is required.");
                 status.update("INSERT INTO status_defs(label, percent_value, sort_order) VALUES (?,?,?)",
                         label, percent, nextSort("status_defs"));
+                logActivity(username, "STATUS_CREATED", label, "Created status " + label + " (" + percent + "%)");
                 invalidateDefs();
                 yield Map.of("message", "Status added");
             }
@@ -591,6 +640,10 @@ public class VmsService {
                     status.update("UPDATE nav_work_items SET status=?, updated_at=? WHERE status=?",
                             label, Instant.now().toString(), old);
                 }
+                logActivity(username, "STATUS_UPDATED", label,
+                        old != null && !old.equals(label)
+                                ? "Renamed status " + old + " → " + label + " (" + percent + "%)"
+                                : "Updated status " + label + " (" + percent + "%)");
                 invalidateDefs();
                 yield Map.of("message", "Status updated");
             }
@@ -598,7 +651,10 @@ public class VmsService {
                 int id = num(body.get("id"));
                 if (id <= 0) throw new ApiException(400, "Invalid status.");
                 if (listStatusDefs().size() <= 1) throw new ApiException(400, "At least one status option is required.");
+                String label = status.query("SELECT label FROM status_defs WHERE id=?", rs -> rs.next() ? rs.getString(1) : null, id);
                 status.update("DELETE FROM status_defs WHERE id=?", id);
+                logActivity(username, "STATUS_DELETED", label != null ? label : String.valueOf(id),
+                        "Deleted status " + (label != null ? label : id));
                 invalidateDefs();
                 yield Map.of("message", "Status deleted");
             }
@@ -620,25 +676,68 @@ public class VmsService {
         return out;
     }
 
-    public byte[] statusPdf(String username) {
+    public byte[] statusPdf(String username, String timeZone) {
         requireAdmin(username);
         try {
             List<Map<String, Object>> venues = listOptionProgress();
+            Map<String, Integer> statusPercent = new LinkedHashMap<>();
+            for (Map<String, Object> s : listStatusDefs()) {
+                statusPercent.put(str(s.get("label")), ((Number) s.get("percent")).intValue());
+            }
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             Document doc = new Document();
             PdfWriter.getInstance(doc, baos);
             doc.open();
             Font title = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 16);
+            Font section = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12);
+            Font header = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 9);
+            Font body = FontFactory.getFont(FontFactory.HELVETICA, 8);
             doc.add(new Paragraph("VMS Status Report", title));
+            doc.add(new Paragraph("Generated: " + formatPdfLocalNow(timeZone), body));
             doc.add(new Paragraph(" "));
-            PdfPTable table = new PdfPTable(2);
-            table.addCell(new PdfPCell(new Phrase("Venue")));
-            table.addCell(new PdfPCell(new Phrase("Progress")));
+
+            doc.add(new Paragraph("Overall Progress", section));
+            doc.add(new Paragraph(" "));
+            PdfPTable summary = new PdfPTable(new float[]{3f, 1f});
+            summary.setWidthPercentage(100);
+            summary.addCell(new PdfPCell(new Phrase("Venue", header)));
+            summary.addCell(new PdfPCell(new Phrase("Progress", header)));
             for (Map<String, Object> v : venues) {
-                table.addCell(str(v.get("label")));
-                table.addCell(str(v.get("percent")) + "%");
+                summary.addCell(new PdfPCell(new Phrase(str(v.get("label")), body)));
+                summary.addCell(new PdfPCell(new Phrase(str(v.get("percent")) + "%", body)));
             }
-            doc.add(table);
+            doc.add(summary);
+            doc.add(new Paragraph(" "));
+
+            doc.add(new Paragraph("Detail by Venue", section));
+            doc.add(new Paragraph(" "));
+            for (Map<String, Object> v : venues) {
+                String venueLabel = str(v.get("label"));
+                doc.add(new Paragraph(venueLabel + " — " + str(v.get("percent")) + "% overall", header));
+                PdfPTable detail = new PdfPTable(new float[]{2.2f, 2f, 1f});
+                detail.setWidthPercentage(100);
+                detail.setSpacingBefore(4f);
+                detail.setSpacingAfter(10f);
+                for (String h : List.of("Work Item", "Status", "Progress")) {
+                    detail.addCell(new PdfPCell(new Phrase(h, header)));
+                }
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> workItems = (List<Map<String, Object>>) v.get("workItems");
+                if (workItems == null || workItems.isEmpty()) {
+                    PdfPCell empty = new PdfPCell(new Phrase("No work items.", body));
+                    empty.setColspan(3);
+                    detail.addCell(empty);
+                } else {
+                    for (Map<String, Object> item : workItems) {
+                        String statusLabel = str(item.get("status"));
+                        int pct = statusPercent.getOrDefault(statusLabel, 0);
+                        detail.addCell(new PdfPCell(new Phrase(str(item.get("name")), body)));
+                        detail.addCell(new PdfPCell(new Phrase(statusLabel, body)));
+                        detail.addCell(new PdfPCell(new Phrase(pct + "%", body)));
+                    }
+                }
+                doc.add(detail);
+            }
             doc.close();
             return baos.toByteArray();
         } catch (Exception ex) {

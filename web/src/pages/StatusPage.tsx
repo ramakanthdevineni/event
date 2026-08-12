@@ -28,7 +28,7 @@ export function StatusPage() {
   return (
     <div className="stack">
       <div className="top-actions" style={{ marginBottom: 0 }}>
-        <a className="btn" href="/api/status/export" target="_blank" rel="noreferrer">Export to PDF</a>
+        <a className="btn" href={`/api/status/export?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`} target="_blank" rel="noreferrer">Export to PDF</a>
       </div>
       <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
         <div className="card">

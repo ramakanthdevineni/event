@@ -32,9 +32,10 @@ public class StatusApiController {
     }
 
     @GetMapping("/api/status/export")
-    public ResponseEntity<byte[]> export(HttpServletRequest request) {
+    public ResponseEntity<byte[]> export(HttpServletRequest request,
+                                         @RequestParam(required = false) String tz) {
         try {
-            byte[] pdf = vms.statusPdf(requireUser(request));
+            byte[] pdf = vms.statusPdf(requireUser(request), tz);
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"status-report.pdf\"")
                     .contentType(MediaType.APPLICATION_PDF)

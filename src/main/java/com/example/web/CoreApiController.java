@@ -124,9 +124,10 @@ public class CoreApiController {
                                              @RequestParam(required = false) String user,
                                              @RequestParam(required = false) String eventType,
                                              @RequestParam(required = false) String from,
-                                             @RequestParam(required = false) String to) {
+                                             @RequestParam(required = false) String to,
+                                             @RequestParam(required = false) String tz) {
         try {
-            byte[] pdf = vms.activityLogsPdf(requireUser(request), user, eventType, from, to);
+            byte[] pdf = vms.activityLogsPdf(requireUser(request), user, eventType, from, to, tz);
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"activity-logs.pdf\"")
                     .contentType(org.springframework.http.MediaType.APPLICATION_PDF)

@@ -35,16 +35,24 @@ const EVENT_TYPE_OPTIONS = [
   { value: 'USER_ENABLED', label: 'User enabled' },
   { value: 'USER_DISABLED', label: 'User disabled' },
   { value: 'VENUE_CREATED', label: 'Venue created' },
+  { value: 'VENUE_UPDATED', label: 'Venue updated' },
+  { value: 'VENUE_DELETED', label: 'Venue deleted' },
   { value: 'WORK_ITEM_CREATED', label: 'Work item created' },
+  { value: 'WORK_ITEM_UPDATED', label: 'Work item updated' },
+  { value: 'WORK_ITEM_DELETED', label: 'Work item deleted' },
+  { value: 'STATUS_CREATED', label: 'Status created' },
+  { value: 'STATUS_UPDATED', label: 'Status updated' },
+  { value: 'STATUS_DELETED', label: 'Status deleted' },
   { value: 'VENUE_STATUS_CHANGE', label: 'Venue status changed' },
 ] as const
 
-function buildQuery(user: string, eventType: string, from: string, to: string) {
+function buildQuery(user: string, eventType: string, from: string, to: string, forExport = false) {
   const params = new URLSearchParams()
   if (user.trim()) params.set('user', user.trim())
   if (eventType) params.set('eventType', eventType)
   if (from) params.set('from', from)
   if (to) params.set('to', to)
+  if (forExport) params.set('tz', Intl.DateTimeFormat().resolvedOptions().timeZone)
   const qs = params.toString()
   return qs ? `?${qs}` : ''
 }
@@ -60,6 +68,11 @@ export function LogsPage() {
 
   const query = useMemo(
     () => buildQuery(applied.user, applied.eventType, applied.from, applied.to),
+    [applied],
+  )
+
+  const exportQuery = useMemo(
+    () => buildQuery(applied.user, applied.eventType, applied.from, applied.to, true),
     [applied],
   )
 
@@ -98,7 +111,7 @@ export function LogsPage() {
             User activity, venue changes, and system events.
           </p>
         </div>
-        <a className="btn" href={`/api/logs/export${query}`} target="_blank" rel="noreferrer">
+        <a className="btn" href={`/api/logs/export${exportQuery}`} target="_blank" rel="noreferrer">
           Export to PDF
         </a>
       </div>
@@ -161,7 +174,7 @@ export function LogsPage() {
         <table className="data">
           <thead>
             <tr>
-              <th>When</th>
+              <th>Date&Time</th>
               <th>User</th>
               <th>Event</th>
               <th>Target</th>
