@@ -36,8 +36,7 @@ export function LoginPage() {
       <main className="login-card">
         <div className="login-card-header">
           <img src="/vms-logo.png" alt="VMS" className="login-logo" />
-          <h1>VMS</h1>
-          <p>Hello Venue Technology Team</p>
+          <h1 className="login-title">VENUE MANAGEMENT SYSTEM</h1>
         </div>
         <form onSubmit={onSubmit}>
           <div className="field">
