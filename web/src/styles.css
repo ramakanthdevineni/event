@@ -340,9 +340,23 @@ table.data th {
   box-shadow: 0 18px 40px rgba(2, 6, 23, 0.45);
 }
 
+.login-card-header {
+  text-align: center;
+  margin-bottom: 1.35rem;
+}
+
 .login-card h1 {
   margin: 0 0 0.35rem;
   letter-spacing: 0.04em;
+}
+
+.login-card-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.login-card form {
+  text-align: left;
 }
 
 .login-card p {

@@ -102,11 +102,13 @@ public class VmsService {
         if (!passwords.isHashed(stored)) {
             users.update("UPDATE users SET password=? WHERE username=?", passwords.hash(password), username);
         }
+        users.update("UPDATE users SET previous_login_at=last_login_at, last_login_at=? WHERE username=?",
+                Instant.now().toString(), username);
         String sessionId = UUID.randomUUID().toString();
         users.update("INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)",
                 sessionId, username, System.currentTimeMillis());
         logActivity(username, "USER_LOGIN", username, "User logged in");
-        Map<String, Object> me = buildMe(username, u);
+        Map<String, Object> me = buildMe(username, findUserRow(username));
         me.put("_sessionId", sessionId);
         return me;
     }
@@ -817,6 +819,10 @@ public class VmsService {
         me.put("mustChangePassword", ((Number) u.get("must_change_password")).intValue() == 1);
         me.put("homePath", home);
         me.put("nav", nav);
+        String lastLogin = str(u.get("previous_login_at"));
+        if (!lastLogin.isEmpty()) {
+            me.put("lastLoginAt", lastLogin);
+        }
         return me;
     }
 
@@ -824,7 +830,7 @@ public class VmsService {
         List<Map<String, Object>> nav = new ArrayList<>();
         List<Map<String, Object>> venues = listVenues();
         if (hasAdmin(role)) {
-            addNav(nav, "Dashboard", "/dashboard");
+            addNav(nav, "Home", "/home");
             addNav(nav, "Users", "/users");
             addNav(nav, "Admin Panel", "/admin");
             addNav(nav, "Status", "/status");
@@ -833,8 +839,8 @@ public class VmsService {
             for (Map<String, Object> v : venues) addNav(nav, str(v.get("label")), "/venues/" + v.get("id"));
         } else {
             List<Map<String, Object>> matched = matchedVenues(role, venues);
+            addNav(nav, "Home", "/home");
             if (hasUser(role) || matched.isEmpty()) {
-                addNav(nav, "Dashboard", "/dashboard");
                 addNav(nav, "Users", "/users");
                 addNav(nav, "Logs", "/logs");
                 addNav(nav, "Mapview", "/mapview");
@@ -847,12 +853,7 @@ public class VmsService {
     }
 
     private String resolveHome(String role, List<Map<String, Object>> nav) {
-        if (hasAdmin(role) || hasUser(role)) return "/dashboard";
-        for (Map<String, Object> n : nav) {
-            String href = str(n.get("href"));
-            if (href.startsWith("/venues/")) return href;
-        }
-        return "/dashboard";
+        return "/home";
     }
 
     private void addNav(List<Map<String, Object>> nav, String label, String href) {
@@ -868,7 +869,7 @@ public class VmsService {
     /** Loads a user row even if disabled (for admin enable/disable/edit of targets). */
     private Map<String, Object> findUserRow(String username) {
         List<Map<String, Object>> rows = users.queryForList(
-                "SELECT first_name, last_name, email, is_admin, must_change_password, role, is_enabled FROM users WHERE username=?",
+                "SELECT first_name, last_name, email, is_admin, must_change_password, role, is_enabled, previous_login_at FROM users WHERE username=?",
                 username);
         if (rows.isEmpty()) throw new ApiException(404, "User not found");
         return rows.get(0);

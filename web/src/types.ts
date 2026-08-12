@@ -11,6 +11,7 @@ export type Me = {
   mustChangePassword: boolean
   homePath: string
   nav: NavItem[]
+  lastLoginAt?: string
 }
 
 export type UserRow = {

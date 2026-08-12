@@ -81,7 +81,9 @@ public class DatabaseBootstrap {
                   must_change_password TINYINT NOT NULL DEFAULT 0,
                   is_enabled TINYINT NOT NULL DEFAULT 1,
                   role VARCHAR(1024) NOT NULL DEFAULT 'user',
-                  created_at VARCHAR(64) NOT NULL
+                  created_at VARCHAR(64) NOT NULL,
+                  last_login_at VARCHAR(64) NULL,
+                  previous_login_at VARCHAR(64) NULL
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         users.execute("""
@@ -146,6 +148,20 @@ public class DatabaseBootstrap {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         migrateStatusChangeLogsToActivityLogs();
+        migrateUserLoginColumns();
+    }
+
+    private void migrateUserLoginColumns() {
+        try {
+            users.execute("ALTER TABLE users ADD COLUMN last_login_at VARCHAR(64) NULL");
+        } catch (Exception ignored) {
+            // column may already exist
+        }
+        try {
+            users.execute("ALTER TABLE users ADD COLUMN previous_login_at VARCHAR(64) NULL");
+        } catch (Exception ignored) {
+            // column may already exist
+        }
     }
 
     private void migrateStatusChangeLogsToActivityLogs() {

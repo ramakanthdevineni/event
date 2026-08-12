@@ -34,8 +34,10 @@ export function LoginPage() {
   return (
     <div className="login-page">
       <main className="login-card">
-        <h1>VMS</h1>
-        <p>Hello Venue Technology Team — sign in to continue.</p>
+        <div className="login-card-header">
+          <h1>VMS</h1>
+          <p>Hello Venue Technology Team</p>
+        </div>
         <form onSubmit={onSubmit}>
           <div className="field">
             <label htmlFor="username">Username</label>

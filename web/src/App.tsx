@@ -40,7 +40,8 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/home" element={<DashboardPage />} />
+        <Route path="/dashboard" element={<Navigate to="/home" replace />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="/users/add" element={<AddUserPage />} />
         <Route path="/admin" element={<AdminPage />} />

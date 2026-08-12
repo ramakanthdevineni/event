@@ -20,7 +20,7 @@ export function ChangePasswordPage() {
     try {
       const data = await api.post<{ homePath: string }>('/api/change-password', { password, confirmPassword })
       await refresh()
-      navigate(data.homePath || '/dashboard', { replace: true })
+      navigate(data.homePath || '/home', { replace: true })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unable to update password')
     }
