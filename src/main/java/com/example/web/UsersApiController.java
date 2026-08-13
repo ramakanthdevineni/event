@@ -23,9 +23,11 @@ public class UsersApiController {
     }
 
     @GetMapping("/api/users")
-    public ResponseEntity<?> list(HttpServletRequest request) {
+    public ResponseEntity<?> list(HttpServletRequest request,
+                                  @RequestParam(value = "page", defaultValue = "1") int page,
+                                  @RequestParam(value = "pageSize", defaultValue = "100") int pageSize) {
         try {
-            return ResponseEntity.ok(vms.listUsers(requireUser(request)));
+            return ResponseEntity.ok(vms.listUsers(requireUser(request), page, pageSize));
         } catch (VmsService.ApiException ex) {
             return ResponseEntity.status(ex.status).body(Map.of("message", ex.getMessage()));
         }

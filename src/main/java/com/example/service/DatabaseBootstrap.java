@@ -98,7 +98,8 @@ public class DatabaseBootstrap {
                   session_id VARCHAR(64) PRIMARY KEY,
                   username VARCHAR(255) NOT NULL,
                   last_activity_ms BIGINT NOT NULL,
-                  INDEX idx_sessions_username (username)
+                  INDEX idx_sessions_username (username),
+                  INDEX idx_sessions_activity (last_activity_ms)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         status.execute("""
@@ -149,6 +150,7 @@ public class DatabaseBootstrap {
                 """);
         migrateStatusChangeLogsToActivityLogs();
         migrateUserLoginColumns();
+        ensureSessionActivityIndex();
         users.execute("""
                 CREATE TABLE IF NOT EXISTS user_role_history (
                   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -177,6 +179,14 @@ public class DatabaseBootstrap {
             users.execute("ALTER TABLE users ADD COLUMN previous_login_at VARCHAR(64) NULL");
         } catch (Exception ignored) {
             // column may already exist
+        }
+    }
+
+    private void ensureSessionActivityIndex() {
+        try {
+            users.execute("CREATE INDEX idx_sessions_activity ON sessions (last_activity_ms)");
+        } catch (Exception ignored) {
+            // index may already exist
         }
     }
 

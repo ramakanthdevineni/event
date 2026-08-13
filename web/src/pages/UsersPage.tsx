@@ -5,7 +5,7 @@ import { useAuth } from '../auth'
 import { RoleDropdown } from '../components/RoleDropdown'
 import type { UserRow, Venue } from '../types'
 
-type UsersPayload = { users: UserRow[]; venues: Venue[]; canManage: boolean }
+type UsersPayload = { users: UserRow[]; venues: Venue[]; canManage: boolean; page?: number; pageSize?: number; total?: number }
 
 export function UsersPage() {
   const { me } = useAuth()
@@ -20,6 +20,8 @@ export function UsersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkRoles, setBulkRoles] = useState<string[]>([])
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [page, setPage] = useState(1)
+  const pageSize = 100
 
   const roleOptions = useMemo(() => {
     const venues = data?.venues || []
@@ -30,9 +32,10 @@ export function UsersPage() {
     ]
   }, [data])
 
-  async function load() {
-    const payload = await api.get<UsersPayload>('/api/users')
+  async function load(nextPage = page) {
+    const payload = await api.get<UsersPayload>(`/api/users?page=${nextPage}&pageSize=${pageSize}`)
     setData(payload)
+    setPage(payload.page ?? nextPage)
     const drafts: Record<string, string[]> = {}
     payload.users.forEach((u) => {
       drafts[u.username] = [...u.roles]
@@ -42,8 +45,8 @@ export function UsersPage() {
   }
 
   useEffect(() => {
-    void load().catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load users'))
-  }, [])
+    void load(page).catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load users'))
+  }, [page])
 
   const filtered = (data?.users || []).filter((u) => {
     const s = q.trim().toLowerCase()
@@ -351,6 +354,25 @@ export function UsersPage() {
           </tbody>
         </table>
       </div>
+
+      {data.total != null && data.total > pageSize && (
+        <div className="card" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', justifyContent: 'center' }}>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+            Previous
+          </button>
+          <span className="muted">
+            Page {page} of {Math.max(1, Math.ceil(data.total / pageSize))} ({data.total} users)
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={page * pageSize >= data.total}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </div>
   )
 }

@@ -40,20 +40,20 @@ public class OriginCheckFilter extends OncePerRequestFilter {
         if (mutating && request.getRequestURI().startsWith("/api/")) {
             String origin = request.getHeader("Origin");
             String referer = request.getHeader("Referer");
-            if (origin != null && !origin.isBlank()) {
-                if (!isAllowed(origin, request)) {
-                    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                    response.setContentType("application/json");
-                    response.getWriter().write("{\"message\":\"Forbidden origin\"}");
-                    return;
-                }
-            } else if (referer != null && !referer.isBlank()) {
-                if (!isAllowed(referer, request)) {
-                    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                    response.setContentType("application/json");
-                    response.getWriter().write("{\"message\":\"Forbidden origin\"}");
-                    return;
-                }
+            boolean hasOrigin = origin != null && !origin.isBlank();
+            boolean hasReferer = referer != null && !referer.isBlank();
+            if (!hasOrigin && !hasReferer) {
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                response.setContentType("application/json");
+                response.getWriter().write("{\"message\":\"Missing Origin or Referer\"}");
+                return;
+            }
+            String candidate = hasOrigin ? origin : referer;
+            if (!isAllowed(candidate, request)) {
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                response.setContentType("application/json");
+                response.getWriter().write("{\"message\":\"Forbidden origin\"}");
+                return;
             }
         }
         filterChain.doFilter(request, response);

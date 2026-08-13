@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -45,6 +46,9 @@ public class VmsService {
     private volatile long workItemDefsCacheAtMs;
     private volatile List<Map<String, Object>> statusDefsCache;
     private volatile long statusDefsCacheAtMs;
+    private final ConcurrentHashMap<String, CachedSession> sessionCache = new ConcurrentHashMap<>();
+
+    private record CachedSession(String username, long lastActivityMs, long cachedAtMs) {}
 
     public VmsService(@Qualifier("usersJdbc") JdbcTemplate users,
                       @Qualifier("statusJdbc") JdbcTemplate status,
@@ -66,20 +70,36 @@ public class VmsService {
 
     public String resolveSessionUsername(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) return null;
+        long now = System.currentTimeMillis();
+        CachedSession cached = sessionCache.get(sessionId);
+        if (cached != null && now - cached.cachedAtMs() < props.getSessionCacheTtlMs()) {
+            if (now - cached.lastActivityMs() > props.getSessionTimeoutMs()) {
+                sessionCache.remove(sessionId);
+                users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
+                return null;
+            }
+            return cached.username();
+        }
         List<Map<String, Object>> rows = users.queryForList(
                 "SELECT username, last_activity_ms FROM sessions WHERE session_id = ?", sessionId);
-        if (rows.isEmpty()) return null;
+        if (rows.isEmpty()) {
+            sessionCache.remove(sessionId);
+            return null;
+        }
         Map<String, Object> row = rows.get(0);
         long last = ((Number) row.get("last_activity_ms")).longValue();
-        long now = System.currentTimeMillis();
         if (now - last > props.getSessionTimeoutMs()) {
+            sessionCache.remove(sessionId);
             users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
             return null;
         }
         if (now - last > 30_000L) {
             users.update("UPDATE sessions SET last_activity_ms = ? WHERE session_id = ?", now, sessionId);
+            last = now;
         }
-        return String.valueOf(row.get("username"));
+        String username = String.valueOf(row.get("username"));
+        sessionCache.put(sessionId, new CachedSession(username, last, now));
+        return username;
     }
 
     public Map<String, Object> login(String username, String password) {
@@ -110,15 +130,25 @@ public class VmsService {
         String sessionId = UUID.randomUUID().toString();
         users.update("INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)",
                 sessionId, username, System.currentTimeMillis());
+        pruneOldSessions(username);
         logActivity(username, "USER_LOGIN", username, "User logged in");
         Map<String, Object> me = buildMe(username, findUserRow(username));
         me.put("_sessionId", sessionId);
+        sessionCache.put(sessionId, new CachedSession(username, System.currentTimeMillis(), System.currentTimeMillis()));
         return me;
     }
 
     public void logout(String sessionId) {
         if (sessionId != null) {
-            String username = resolveSessionUsername(sessionId);
+            CachedSession cached = sessionCache.remove(sessionId);
+            String username = cached != null ? cached.username() : null;
+            if (username == null) {
+                List<Map<String, Object>> rows = users.queryForList(
+                        "SELECT username FROM sessions WHERE session_id = ?", sessionId);
+                if (!rows.isEmpty()) {
+                    username = String.valueOf(rows.get(0).get("username"));
+                }
+            }
             if (username != null) {
                 logActivity(username, "USER_LOGOUT", username, "User logged out");
             }
@@ -475,13 +505,18 @@ public class VmsService {
         }
     }
 
-    public Map<String, Object> listUsers(String currentUsername) {
+    public Map<String, Object> listUsers(String currentUsername, int page, int pageSize) {
         Map<String, Object> current = loadUser(currentUsername);
         String role = roleOf(current);
         if (!hasAdmin(role) && !hasUser(role)) throw new ApiException(403, "Forbidden");
         boolean canManage = hasAdmin(role);
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(200, Math.max(1, pageSize));
+        int offset = (safePage - 1) * safeSize;
+        Integer total = users.queryForObject("SELECT COUNT(*) FROM users", Integer.class);
         List<Map<String, Object>> userRows = users.queryForList(
-                "SELECT username, first_name, last_name, email, is_admin, role, is_enabled FROM users ORDER BY created_at DESC");
+                "SELECT username, first_name, last_name, email, is_admin, role, is_enabled FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                safeSize, offset);
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> u : userRows) {
             String r = roleOf(u);
@@ -497,7 +532,13 @@ public class VmsService {
                     "isAdmin", hasAdmin(r)
             ));
         }
-        return Map.of("users", out, "venues", listVenues(), "canManage", canManage);
+        return Map.of(
+                "users", out,
+                "venues", listVenues(),
+                "canManage", canManage,
+                "page", safePage,
+                "pageSize", safeSize,
+                "total", total == null ? 0 : total);
     }
 
     public Map<String, Object> createUser(String currentUsername, String firstName, String lastName, String email) {
@@ -517,8 +558,7 @@ public class VmsService {
         }
         logActivity(currentUsername, "USER_CREATED", newUsername,
                 "Created user " + firstName + " " + lastName + " (" + email + ")");
-        return Map.of("message", "User created. Email is the username and default password is "
-                + props.getDefaultNewUserPassword() + ".");
+        return Map.of("message", "User created. They must sign in with their email and the temporary password provided by your administrator.");
     }
 
     public byte[] exportUsersCsv(String currentUsername) {
@@ -527,7 +567,7 @@ public class VmsService {
         sb.append('\uFEFF');
         sb.append("firstName,lastName,email,status,roles\n");
         @SuppressWarnings("unchecked")
-        List<Map<String, Object>> rows = (List<Map<String, Object>>) listUsers(currentUsername).get("users");
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) listUsers(currentUsername, 1, 10_000).get("users");
         for (Map<String, Object> u : rows) {
             sb.append(csvCell(str(u.get("firstName")))).append(',');
             sb.append(csvCell(str(u.get("lastName")))).append(',');
@@ -740,8 +780,8 @@ public class VmsService {
                 if (target.equals(currentUsername)) throw new ApiException(400, "You cannot delete your own account.");
                 if (props.getDefaultAdminUsername().equals(target)) throw new ApiException(400, "The default admin account cannot be deleted.");
                 logActivity(currentUsername, "USER_DELETED", target, "Deleted user " + target);
+                clearSessionsForUser(target);
                 users.update("DELETE FROM users WHERE username=?", target);
-                users.update("DELETE FROM sessions WHERE username=?", target);
                 return Map.of("message", "User deleted");
             }
             case "toggle-enabled" -> {
@@ -751,6 +791,7 @@ public class VmsService {
                 boolean enabled = ((Number) t.get("is_enabled")).intValue() == 1;
                 users.update("UPDATE users SET is_enabled=? WHERE username=?", enabled ? 0 : 1, target);
                 if (enabled) users.update("DELETE FROM sessions WHERE username=?", target);
+                clearSessionsForUser(target);
                 logActivity(currentUsername, enabled ? "USER_DISABLED" : "USER_ENABLED", target,
                         enabled ? "Disabled user " + target : "Enabled user " + target);
                 return Map.of("message", "User status updated");
@@ -912,7 +953,8 @@ public class VmsService {
 
     public Map<String, Object> status(String username, Integer optionId) {
         requireStandardAccess(username);
-        List<Map<String, Object>> venues = listOptionProgress();
+        Map<String, Object> user = loadUser(username);
+        List<Map<String, Object>> venues = venuesForUser(user);
         Map<String, Object> selected = null;
         if (optionId != null) {
             selected = venues.stream().filter(v -> Objects.equals(v.get("id"), optionId)).findFirst().orElse(null);
@@ -926,8 +968,9 @@ public class VmsService {
 
     public byte[] statusPdf(String username, String timeZone) {
         requireStandardAccess(username);
+        Map<String, Object> user = loadUser(username);
         try {
-            List<Map<String, Object>> venues = listOptionProgress();
+            List<Map<String, Object>> venues = venuesForUser(user);
             Map<String, Integer> statusPercent = new LinkedHashMap<>();
             for (Map<String, Object> s : listStatusDefs()) {
                 statusPercent.put(str(s.get("label")), ((Number) s.get("percent")).intValue());
@@ -995,8 +1038,8 @@ public class VmsService {
     }
 
     public Map<String, Object> mapview(String username) {
-        loadUser(username);
-        List<Map<String, Object>> venues = listOptionProgress();
+        Map<String, Object> user = loadUser(username);
+        List<Map<String, Object>> venues = venuesForUser(user);
         Map<Integer, Integer> markersPerCity = new HashMap<>();
         List<double[]> placedPoints = new ArrayList<>();
         List<Map<String, Object>> markers = new ArrayList<>();
@@ -1137,6 +1180,37 @@ public class VmsService {
         return users.queryForList("SELECT id, label FROM nav_options ORDER BY label ASC");
     }
 
+    private void clearSessionsForUser(String username) {
+        users.update("DELETE FROM sessions WHERE username=?", username);
+        sessionCache.entrySet().removeIf(e -> username.equals(e.getValue().username()));
+    }
+
+    private void pruneOldSessions(String username) {
+        int keep = Math.max(1, props.getMaxSessionsPerUser());
+        List<Map<String, Object>> rows = users.queryForList(
+                "SELECT session_id FROM sessions WHERE username=? ORDER BY last_activity_ms DESC", username);
+        if (rows.size() <= keep) return;
+        for (int i = keep; i < rows.size(); i++) {
+            String sid = String.valueOf(rows.get(i).get("session_id"));
+            users.update("DELETE FROM sessions WHERE session_id=?", sid);
+            sessionCache.remove(sid);
+        }
+    }
+
+    private List<Map<String, Object>> venuesForUser(Map<String, Object> user) {
+        String role = roleOf(user);
+        List<Map<String, Object>> all = listOptionProgress();
+        if (hasAdmin(role) || hasUser(role)) {
+            return all;
+        }
+        Set<Integer> allowed = matchedVenues(role, listVenues()).stream()
+                .map(v -> ((Number) v.get("id")).intValue())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        return all.stream()
+                .filter(v -> allowed.contains(((Number) v.get("id")).intValue()))
+                .toList();
+    }
+
     private boolean canAccessVenue(Map<String, Object> user, Map<String, Object> option) {
         String role = roleOf(user);
         if (hasAdmin(role) || hasUser(role)) return true;
@@ -1227,10 +1301,10 @@ public class VmsService {
 
     private List<Map<String, Object>> listOptionProgress() {
         long now = System.currentTimeMillis();
-        if (progressCache != null && now - progressCacheAtMs < 3000) return progressCache;
+        if (progressCache != null && now - progressCacheAtMs < 30_000) return progressCache;
         synchronized (progressLock) {
             now = System.currentTimeMillis();
-            if (progressCache != null && now - progressCacheAtMs < 3000) return progressCache;
+            if (progressCache != null && now - progressCacheAtMs < 30_000) return progressCache;
             Map<String, Integer> pct = new HashMap<>();
             for (Map<String, Object> s : listStatusDefs()) {
                 pct.put(str(s.get("label")), ((Number) s.get("percent")).intValue());

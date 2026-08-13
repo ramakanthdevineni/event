@@ -22,6 +22,10 @@ public class AppProperties {
     private String cookieSameSite = "Lax";
     private int loginMaxAttempts = 10;
     private long loginWindowMs = 300_000L;
+    private int dbPoolMaxSize = 3;
+    private long sessionCacheTtlMs = 30_000L;
+    private long sessionCleanupIntervalMs = 300_000L;
+    private int maxSessionsPerUser = 5;
     /** mysql (default in Docker) or sqlite */
     private String dbType = "mysql";
     private String dbHost = "mysql";
@@ -50,6 +54,14 @@ public class AppProperties {
     public void setLoginMaxAttempts(int loginMaxAttempts) { this.loginMaxAttempts = loginMaxAttempts; }
     public long getLoginWindowMs() { return loginWindowMs; }
     public void setLoginWindowMs(long loginWindowMs) { this.loginWindowMs = loginWindowMs; }
+    public int getDbPoolMaxSize() { return dbPoolMaxSize; }
+    public void setDbPoolMaxSize(int dbPoolMaxSize) { this.dbPoolMaxSize = dbPoolMaxSize; }
+    public long getSessionCacheTtlMs() { return sessionCacheTtlMs; }
+    public void setSessionCacheTtlMs(long sessionCacheTtlMs) { this.sessionCacheTtlMs = sessionCacheTtlMs; }
+    public long getSessionCleanupIntervalMs() { return sessionCleanupIntervalMs; }
+    public void setSessionCleanupIntervalMs(long sessionCleanupIntervalMs) { this.sessionCleanupIntervalMs = sessionCleanupIntervalMs; }
+    public int getMaxSessionsPerUser() { return maxSessionsPerUser; }
+    public void setMaxSessionsPerUser(int maxSessionsPerUser) { this.maxSessionsPerUser = maxSessionsPerUser; }
     public String getDbType() { return dbType; }
     public void setDbType(String dbType) { this.dbType = dbType; }
     public String getDbHost() { return dbHost; }
@@ -69,7 +81,8 @@ public class AppProperties {
 
     public String mysqlJdbcUrl() {
         return "jdbc:mysql://" + dbHost + ":" + dbPort + "/" + dbName
-                + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8";
+                + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8"
+                + "&cachePrepStmts=true&useServerPrepStmts=true&rewriteBatchedStatements=true";
     }
 
     public Set<String> corsOrigins() {

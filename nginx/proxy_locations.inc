@@ -1,4 +1,5 @@
 proxy_http_version 1.1;
+proxy_set_header Connection "";
 proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -9,30 +10,12 @@ proxy_pass_header Set-Cookie;
 proxy_connect_timeout 10s;
 proxy_send_timeout 60s;
 proxy_read_timeout 60s;
+proxy_buffering on;
 
-location /api/users {
-    set $svc_users users:8080;
-    proxy_pass http://$svc_users;
-}
-location /api/admin {
-    set $svc_admin admin:8080;
-    proxy_pass http://$svc_admin;
-}
-location /api/status/ {
-    set $svc_statusapp status:8080;
-    proxy_pass http://$svc_statusapp;
-}
-location /api/status {
-    set $svc_statusapp status:8080;
-    proxy_pass http://$svc_statusapp;
-}
-location /api/mapview {
-    set $svc_mapview mapview:8080;
-    proxy_pass http://$svc_mapview;
-}
 location /api/ {
-    set $svc_core core:8080;
-    proxy_pass http://$svc_core;
+    limit_req zone=api_limit burst=400 nodelay;
+    limit_conn conn_limit 200;
+    proxy_pass http://vms_api;
 }
 
 location /assets/ {
