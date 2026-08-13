@@ -26,8 +26,6 @@ public class AppProperties {
     private long sessionCacheTtlMs = 30_000L;
     private long sessionCleanupIntervalMs = 300_000L;
     private int maxSessionsPerUser = 5;
-    private String redisHost = "";
-    private int redisPort = 6379;
     /** mysql (default in Docker) or sqlite */
     private String dbType = "mysql";
     private String dbHost = "mysql";
@@ -64,13 +62,6 @@ public class AppProperties {
     public void setSessionCleanupIntervalMs(long sessionCleanupIntervalMs) { this.sessionCleanupIntervalMs = sessionCleanupIntervalMs; }
     public int getMaxSessionsPerUser() { return maxSessionsPerUser; }
     public void setMaxSessionsPerUser(int maxSessionsPerUser) { this.maxSessionsPerUser = maxSessionsPerUser; }
-    public String getRedisHost() { return redisHost; }
-    public void setRedisHost(String redisHost) { this.redisHost = redisHost; }
-    public int getRedisPort() { return redisPort; }
-    public void setRedisPort(int redisPort) { this.redisPort = redisPort; }
-    public boolean isRedisEnabled() {
-        return redisHost != null && !redisHost.isBlank();
-    }
     public String getDbType() { return dbType; }
     public void setDbType(String dbType) { this.dbType = dbType; }
     public String getDbHost() { return dbHost; }

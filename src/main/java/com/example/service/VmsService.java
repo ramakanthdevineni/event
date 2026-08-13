@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -36,7 +37,6 @@ public class VmsService {
     private final JdbcTemplate status;
     private final AppProperties props;
     private final PasswordService passwords;
-    private final SessionStore sessions;
 
     private final Object progressLock = new Object();
     private volatile List<Map<String, Object>> progressCache;
@@ -46,17 +46,18 @@ public class VmsService {
     private volatile long workItemDefsCacheAtMs;
     private volatile List<Map<String, Object>> statusDefsCache;
     private volatile long statusDefsCacheAtMs;
+    private final ConcurrentHashMap<String, CachedSession> sessionCache = new ConcurrentHashMap<>();
+
+    private record CachedSession(String username, long lastActivityMs, long cachedAtMs) {}
 
     public VmsService(@Qualifier("usersJdbc") JdbcTemplate users,
                       @Qualifier("statusJdbc") JdbcTemplate status,
                       AppProperties props,
-                      PasswordService passwords,
-                      SessionStore sessions) {
+                      PasswordService passwords) {
         this.users = users;
         this.status = status;
         this.props = props;
         this.passwords = passwords;
-        this.sessions = sessions;
     }
 
     public static class ApiException extends RuntimeException {
@@ -70,16 +71,35 @@ public class VmsService {
     public String resolveSessionUsername(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) return null;
         long now = System.currentTimeMillis();
-        SessionStore.Session session = sessions.find(sessionId);
-        if (session == null) return null;
-        if (now - session.lastActivityMs() > props.getSessionTimeoutMs()) {
-            sessions.delete(sessionId);
+        CachedSession cached = sessionCache.get(sessionId);
+        if (cached != null && now - cached.cachedAtMs() < props.getSessionCacheTtlMs()) {
+            if (now - cached.lastActivityMs() > props.getSessionTimeoutMs()) {
+                sessionCache.remove(sessionId);
+                users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
+                return null;
+            }
+            return cached.username();
+        }
+        List<Map<String, Object>> rows = users.queryForList(
+                "SELECT username, last_activity_ms FROM sessions WHERE session_id = ?", sessionId);
+        if (rows.isEmpty()) {
+            sessionCache.remove(sessionId);
             return null;
         }
-        if (now - session.lastActivityMs() > 30_000L) {
-            sessions.touch(sessionId, now);
+        Map<String, Object> row = rows.get(0);
+        long last = ((Number) row.get("last_activity_ms")).longValue();
+        if (now - last > props.getSessionTimeoutMs()) {
+            sessionCache.remove(sessionId);
+            users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
+            return null;
         }
-        return session.username();
+        if (now - last > 30_000L) {
+            users.update("UPDATE sessions SET last_activity_ms = ? WHERE session_id = ?", now, sessionId);
+            last = now;
+        }
+        String username = String.valueOf(row.get("username"));
+        sessionCache.put(sessionId, new CachedSession(username, last, now));
+        return username;
     }
 
     public Map<String, Object> login(String username, String password) {
@@ -108,22 +128,31 @@ public class VmsService {
         users.update("UPDATE users SET previous_login_at=last_login_at, last_login_at=? WHERE username=?",
                 Instant.now().toString(), username);
         String sessionId = UUID.randomUUID().toString();
-        long now = System.currentTimeMillis();
-        sessions.create(sessionId, username, now);
-        sessions.pruneOldest(username, Math.max(1, props.getMaxSessionsPerUser()));
+        users.update("INSERT INTO sessions(session_id, username, last_activity_ms) VALUES (?, ?, ?)",
+                sessionId, username, System.currentTimeMillis());
+        pruneOldSessions(username);
         logActivity(username, "USER_LOGIN", username, "User logged in");
         Map<String, Object> me = buildMe(username, findUserRow(username));
         me.put("_sessionId", sessionId);
+        sessionCache.put(sessionId, new CachedSession(username, System.currentTimeMillis(), System.currentTimeMillis()));
         return me;
     }
 
     public void logout(String sessionId) {
         if (sessionId != null) {
-            SessionStore.Session session = sessions.find(sessionId);
-            if (session != null) {
-                logActivity(session.username(), "USER_LOGOUT", session.username(), "User logged out");
+            CachedSession cached = sessionCache.remove(sessionId);
+            String username = cached != null ? cached.username() : null;
+            if (username == null) {
+                List<Map<String, Object>> rows = users.queryForList(
+                        "SELECT username FROM sessions WHERE session_id = ?", sessionId);
+                if (!rows.isEmpty()) {
+                    username = String.valueOf(rows.get(0).get("username"));
+                }
             }
-            sessions.delete(sessionId);
+            if (username != null) {
+                logActivity(username, "USER_LOGOUT", username, "User logged out");
+            }
+            users.update("DELETE FROM sessions WHERE session_id = ?", sessionId);
         }
     }
 
@@ -614,7 +643,7 @@ public class VmsService {
                     users.update(
                             "UPDATE users SET first_name=?, last_name=?, email=?, role=?, is_admin=?, is_enabled=? WHERE username=?",
                             firstName, lastName, email, serialized, hasAdmin(serialized) ? 1 : 0, enabled ? 1 : 0, target);
-                    if (!enabled) sessions.deleteByUsername(target);
+                    if (!enabled) users.update("DELETE FROM sessions WHERE username=?", target);
                     recordUserRoleChange(currentUsername, target, oldRole, serialized, "import");
                     updated++;
                 }
@@ -761,7 +790,8 @@ public class VmsService {
                 Map<String, Object> t = findUserRow(target);
                 boolean enabled = ((Number) t.get("is_enabled")).intValue() == 1;
                 users.update("UPDATE users SET is_enabled=? WHERE username=?", enabled ? 0 : 1, target);
-                if (enabled) sessions.deleteByUsername(target);
+                if (enabled) users.update("DELETE FROM sessions WHERE username=?", target);
+                clearSessionsForUser(target);
                 logActivity(currentUsername, enabled ? "USER_DISABLED" : "USER_ENABLED", target,
                         enabled ? "Disabled user " + target : "Enabled user " + target);
                 return Map.of("message", "User status updated");
@@ -1151,7 +1181,20 @@ public class VmsService {
     }
 
     private void clearSessionsForUser(String username) {
-        sessions.deleteByUsername(username);
+        users.update("DELETE FROM sessions WHERE username=?", username);
+        sessionCache.entrySet().removeIf(e -> username.equals(e.getValue().username()));
+    }
+
+    private void pruneOldSessions(String username) {
+        int keep = Math.max(1, props.getMaxSessionsPerUser());
+        List<Map<String, Object>> rows = users.queryForList(
+                "SELECT session_id FROM sessions WHERE username=? ORDER BY last_activity_ms DESC", username);
+        if (rows.size() <= keep) return;
+        for (int i = keep; i < rows.size(); i++) {
+            String sid = String.valueOf(rows.get(i).get("session_id"));
+            users.update("DELETE FROM sessions WHERE session_id=?", sid);
+            sessionCache.remove(sid);
+        }
     }
 
     private List<Map<String, Object>> venuesForUser(Map<String, Object> user) {
