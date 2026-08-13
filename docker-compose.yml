@@ -18,6 +18,28 @@ x-app-env: &app-env
   SESSION_CACHE_TTL_MS: ${SESSION_CACHE_TTL_MS:-60000}
   SESSION_CLEANUP_INTERVAL_MS: ${SESSION_CLEANUP_INTERVAL_MS:-300000}
   MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-5}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+
+x-api: &api-service
+  build: .
+  environment:
+    <<: *app-env
+    SERVICE_NAME: all
+  volumes:
+    - ./data:/app/data
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+    interval: 15s
+    timeout: 5s
+    retries: 10
+    start_period: 120s
+  restart: unless-stopped
 
 services:
   mysql:
@@ -37,24 +59,23 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Monolithic API — one JVM serves all endpoints (better under high concurrency than 5 separate services).
-  api:
-    build: .
-    environment:
-      <<: *app-env
-      SERVICE_NAME: all
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
-      - ./data:/app/data
-    depends_on:
-      mysql:
-        condition: service_healthy
+      - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
-      interval: 15s
-      timeout: 5s
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
       retries: 10
-      start_period: 120s
     restart: unless-stopped
+
+  api-1:
+    <<: *api-service
+
+  api-2:
+    <<: *api-service
 
   gateway:
     build:
@@ -64,7 +85,9 @@ services:
       - "8080:80"
       - "8443:443"
     depends_on:
-      api:
+      api-1:
+        condition: service_healthy
+      api-2:
         condition: service_healthy
     restart: unless-stopped
 
@@ -106,3 +129,4 @@ services:
 
 volumes:
   mysql_data:
+  redis_data:
